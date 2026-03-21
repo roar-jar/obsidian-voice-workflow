@@ -2,14 +2,19 @@
 
 Obsidian 우측 사이드바에서 음성 녹음, 실시간 전사, 템플릿 기반 요약, 원문 보관을 처리하는 플러그인입니다.
 
-![Voice Workflow overview](assets/readme/voice-workflow-overview.png)
-
 ## 화면 미리보기
 
-- 전체 워크플로우: 우측 패널에서 녹음과 전사를 확인하고, 중앙 노트에는 템플릿 요약과 원문 아카이브를 함께 저장합니다.
-- 빠른 시작 데모:
+- 요약 저장 화면: 템플릿을 적용해 노트 본문 상단에 구조화된 요약을 저장합니다.
 
-![Voice Workflow quick start](assets/readme/voice-workflow-quick-start.gif)
+![Summary workflow](assets/readme/obsidian-summary-workflow.png)
+
+- 실시간 전사 화면: 녹음 중 우측 패널에서 전사 문장이 시간 순서대로 쌓입니다.
+
+![Live transcript](assets/readme/obsidian-live-transcript.png)
+
+- 원문/오디오 아카이브 화면: 저장 후 노트 하단에 음성 파일과 원문 전사가 함께 보관됩니다.
+
+![Archive view](assets/readme/obsidian-archive-view.png)
 
 ## 핵심 기능
 
