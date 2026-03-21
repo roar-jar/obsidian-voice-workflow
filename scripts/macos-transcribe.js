@@ -104,10 +104,16 @@ function run(argv) {
     throw new Error("Usage: osascript -l JavaScript macos-transcribe.js <audio-path> [locale]");
   }
 
-  const audioPath = argv[0];
+  const authorizeOnly = argv[0] === "--authorize-only";
+  const audioPath = authorizeOnly ? "" : argv[0];
   const localeIdentifier = resolveLocaleIdentifier(argv[1]);
 
   requestAuthorization();
+  if (authorizeOnly) {
+    console.log("AUTHORIZED");
+    return;
+  }
+
   const transcript = transcribeAudioFile(audioPath, localeIdentifier);
   console.log(transcript);
 }

@@ -88,6 +88,33 @@
   line-height: 1.45;
 }
 
+.voice-workflow-status-message {
+  white-space: pre-wrap;
+}
+
+.voice-workflow-status-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  margin-top: 0.75rem;
+}
+
+.voice-workflow-status-action {
+  appearance: none;
+  border: 1px solid var(--vw-border);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--text-normal);
+  cursor: pointer;
+  font-size: 0.82rem;
+  font-weight: 600;
+  padding: 0.38rem 0.7rem;
+}
+
+.voice-workflow-status-action:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
 .voice-workflow-status.is-error {
   color: var(--text-error);
   border-color: color-mix(in srgb, var(--text-error) 48%, var(--vw-border));
@@ -238,8 +265,14 @@
 }
 
 .voice-workflow-feed-row.is-interim .voice-workflow-feed-bubble {
-  border-style: dashed;
-  color: var(--vw-muted);
+  border-color: color-mix(in srgb, var(--interactive-accent) 28%, var(--vw-border));
+  background: color-mix(in srgb, var(--vw-feed) 88%, var(--interactive-accent));
+  color: var(--text-normal);
+}
+
+.voice-workflow-feed-row.is-interim .voice-workflow-feed-time {
+  background: rgba(59, 130, 246, 0.14);
+  color: #93c5fd;
 }
 
 .voice-workflow-empty-state {
@@ -322,8 +355,54 @@
 
 .voice-workflow-summary-footer {
   display: flex;
-  justify-content: flex-end;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.65rem;
   margin-top: 1rem;
+}
+
+.voice-workflow-primary-button {
+  width: 100%;
+  min-height: 2.75rem;
+  border-radius: 14px;
+  font-weight: 700;
+  letter-spacing: -0.01em;
+}
+
+.voice-workflow-primary-button:not(:disabled) {
+  box-shadow: 0 10px 24px rgba(37, 99, 235, 0.2);
+}
+
+.voice-workflow-primary-button:disabled {
+  opacity: 1;
+  cursor: not-allowed;
+  box-shadow: none;
+  background: color-mix(in srgb, var(--background-secondary-alt) 82%, black);
+  border-color: color-mix(in srgb, var(--vw-border) 92%, transparent);
+  color: var(--vw-muted);
+}
+
+.voice-workflow-summary-hint {
+  padding: 0.8rem 0.9rem;
+  border-radius: 14px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--vw-muted);
+  line-height: 1.5;
+  font-size: 0.86rem;
+}
+
+.voice-workflow-summary-hint.is-ready {
+  color: #93c5fd;
+  background: rgba(59, 130, 246, 0.12);
+}
+
+.voice-workflow-summary-hint.is-warning {
+  color: #fcd34d;
+  background: rgba(245, 158, 11, 0.12);
+}
+
+.voice-workflow-summary-hint.is-muted {
+  color: var(--vw-muted);
 }
 
 .voice-workflow-bottombar {

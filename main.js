@@ -35,6 +35,7 @@ const RECORDING_ARCHIVE_HEADING = "원문 전사 및 저장 내역";
 const TRANSCRIPT_HEADING = "원문 전사";
 const TRANSLATED_TRANSCRIPT_HEADING = "번역 전사 (한국어)";
 const SUMMARY_HEADING = "템플릿 요약";
+const LIVE_TRANSCRIPT_COMMIT_INTERVAL_MS = 50 * 1000;
 
 const AI_PROVIDER_OPTIONS = [
   { value: "openai", label: "OpenAI Compatible" },
@@ -42,7 +43,19 @@ const AI_PROVIDER_OPTIONS = [
   { value: "gemini", label: "Gemini (Google)" },
 ];
 
+const STT_PROVIDER_OPTIONS = [
+  { value: "auto", label: "Auto (OS Default)" },
+  { value: "macos-speech", label: "macOS Local Speech" },
+  { value: "windows-speech", label: "Windows Speech" },
+  { value: "openai", label: "OpenAI Compatible API" },
+];
+
 const AI_PROVIDER_MAP = AI_PROVIDER_OPTIONS.reduce((accumulator, option) => {
+  accumulator[option.value] = option;
+  return accumulator;
+}, {});
+
+const STT_PROVIDER_MAP = STT_PROVIDER_OPTIONS.reduce((accumulator, option) => {
   accumulator[option.value] = option;
   return accumulator;
 }, {});
@@ -119,9 +132,28 @@ const LANGUAGE_MAP = LANGUAGE_OPTIONS.reduce((accumulator, option) => {
 }, {});
 
 function getDefaultSttProvider() {
-  return typeof process !== "undefined" && process.platform === "darwin"
-    ? "macos-speech"
-    : "openai";
+  return "auto";
+}
+
+function getPlatformSttProvider() {
+  if (typeof process === "undefined") {
+    return "openai";
+  }
+
+  if (process.platform === "darwin") {
+    return "macos-speech";
+  }
+
+  if (process.platform === "win32") {
+    return "windows-speech";
+  }
+
+  return "openai";
+}
+
+function normalizeSttProvider(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return STT_PROVIDER_MAP[raw] ? raw : getDefaultSttProvider();
 }
 
 function normalizeAiProvider(value) {
@@ -165,6 +197,70 @@ function normalizeLanguageKey(value) {
   }
 
   return "auto";
+}
+
+function getErrorText(error) {
+  if (error == null) {
+    return "";
+  }
+
+  if (typeof error === "string") {
+    return error;
+  }
+
+  if (error instanceof Error) {
+    return error.message || String(error);
+  }
+
+  return String(error);
+}
+
+function createTaggedError(code, message, cause) {
+  const error = new Error(message);
+  error.code = code;
+  if (cause) {
+    error.cause = cause;
+  }
+  return error;
+}
+
+function isNoSpeechError(error) {
+  const message = getErrorText(error).toLowerCase();
+  return (
+    message.includes("no speech detected") ||
+    message.includes("empty transcript") ||
+    message.includes("returned an empty transcript") ||
+    message.includes("음성이 감지되지 않았습니다") ||
+    message.includes("전사 결과가 비어 있습니다") ||
+    message.includes("(-2700)")
+  );
+}
+
+function isSpeechPermissionError(error) {
+  const message = getErrorText(error).toLowerCase();
+  return (
+    message.includes("authorization was denied") ||
+    message.includes("speech recognition authorization was denied") ||
+    message.includes("speech recognition' 권한") ||
+    message.includes("speech recognition 권한") ||
+    message.includes("privacy & security > speech recognition") ||
+    message.includes("개인정보 보호 및 보안 > speech recognition")
+  );
+}
+
+function isRecoverableSpeechError(error) {
+  return isNoSpeechError(error) || isSpeechPermissionError(error);
+}
+
+function isMicrophonePermissionError(error) {
+  const message = getErrorText(error).toLowerCase();
+  return (
+    message.includes("notallowederror") ||
+    message.includes("permission denied") ||
+    message.includes("microphone") ||
+    message.includes("마이크 권한") ||
+    message.includes("permissions policy")
+  );
 }
 
 const DEFAULT_SETTINGS = {
@@ -268,8 +364,10 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       DEFAULT_SETTINGS.customSummaryTemplate;
 
     const aiProvider = normalizeAiProvider(loaded.aiProvider);
+    const sttProvider = normalizeSttProvider(loaded.sttProvider);
     this.settings = Object.assign({}, DEFAULT_SETTINGS, loaded, {
       aiProvider,
+      sttProvider,
       sourceLanguage,
       openAiApiKey: loaded.openAiApiKey || loaded.apiKey || DEFAULT_SETTINGS.openAiApiKey,
       openAiApiBaseUrl:
@@ -289,6 +387,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   async saveSettings() {
     this.settings.aiProvider = normalizeAiProvider(this.settings.aiProvider);
+    this.settings.sttProvider = normalizeSttProvider(this.settings.sttProvider);
     this.settings.sourceLanguage = normalizeLanguageKey(this.settings.sourceLanguage);
     this.settings.transcriptionLanguage =
       this.resolveOpenAiLanguage(this.settings.sourceLanguage);
@@ -327,6 +426,42 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   getLanguageOptions() {
     return LANGUAGE_OPTIONS;
+  }
+
+  getSttProviderOptions() {
+    return STT_PROVIDER_OPTIONS;
+  }
+
+  getConfiguredSttProvider() {
+    return normalizeSttProvider(this.settings.sttProvider);
+  }
+
+  getResolvedSttProvider() {
+    const configured = this.getConfiguredSttProvider();
+    if (configured === "auto") {
+      return getPlatformSttProvider();
+    }
+
+    if (configured === "macos-speech") {
+      return typeof process !== "undefined" && process.platform === "darwin"
+        ? configured
+        : "openai";
+    }
+
+    if (configured === "windows-speech") {
+      return typeof process !== "undefined" && process.platform === "win32"
+        ? configured
+        : "openai";
+    }
+
+    return configured;
+  }
+
+  getSttProviderLabel(value) {
+    return (
+      STT_PROVIDER_MAP[normalizeSttProvider(value)]?.label ||
+      STT_PROVIDER_MAP[getDefaultSttProvider()].label
+    );
   }
 
   getAiProviderOptions() {
@@ -458,6 +593,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         audioBlob,
         audioPath,
         language: sourceLanguage,
+        previewTranscript,
       });
     } catch (error) {
       transcriptError = error;
@@ -608,11 +744,20 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       .trim();
   }
 
-  async transcribeAudio({ audioBlob, audioPath, language }) {
-    const provider = this.settings.sttProvider || "openai";
+  async transcribeAudio({ audioBlob, audioPath, language, previewTranscript }) {
+    const provider = this.getResolvedSttProvider();
 
     if (provider === "macos-speech") {
       return this.transcribeWithMacOsSpeech(audioPath, language);
+    }
+
+    if (provider === "windows-speech") {
+      return this.transcribeWithWindowsSpeech({
+        audioBlob,
+        audioPath,
+        language,
+        previewTranscript,
+      });
     }
 
     return this.transcribeWithOpenAi(
@@ -680,11 +825,29 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         (error, standardOutput, standardError) => {
           if (error) {
             const detail = standardError?.trim() || error.message || "알 수 없는 오류";
-            reject(
-              new Error(
-                `macOS Speech 전사 실패: ${detail}. 처음 실행이면 Obsidian 또는 osascript에 'Speech Recognition' 권한을 허용해야 할 수 있습니다.`
-              )
-            );
+            if (isSpeechPermissionError(detail)) {
+              reject(
+                createTaggedError(
+                  "speech-permission",
+                  "macOS 'Speech Recognition' 권한이 필요합니다. 시스템 설정 > 개인정보 보호 및 보안 > Speech Recognition에서 허용하세요.",
+                  error
+                )
+              );
+              return;
+            }
+
+            if (isNoSpeechError(detail)) {
+              reject(
+                createTaggedError(
+                  "no-speech",
+                  "음성이 감지되지 않았습니다.",
+                  error
+                )
+              );
+              return;
+            }
+
+            reject(new Error(`macOS Speech 전사 실패: ${detail}`));
             return;
           }
 
@@ -695,10 +858,33 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
     const transcript = String(transcriptText || "").trim();
     if (!transcript) {
-      throw new Error("macOS Speech 전사 결과가 비어 있습니다.");
+      throw createTaggedError("no-speech", "음성이 감지되지 않았습니다.");
     }
 
     return transcript;
+  }
+
+  async transcribeWithWindowsSpeech({ audioBlob, audioPath, language, previewTranscript }) {
+    if (typeof process !== "undefined" && process.platform !== "win32") {
+      throw new Error("Windows Speech provider는 Windows 데스크톱 환경에서만 사용할 수 있습니다.");
+    }
+
+    const normalizedPreview = this.normalizeText(previewTranscript);
+    if (normalizedPreview) {
+      return normalizedPreview;
+    }
+
+    if (this.getOpenAiApiKey()) {
+      return this.transcribeWithOpenAi(
+        audioBlob,
+        this.basename(audioPath),
+        language
+      );
+    }
+
+    throw new Error(
+      "Windows Speech provider는 현재 실시간 전사 누적본을 최종 전사로 사용합니다. 실시간 전사가 비어 있으면 OpenAI STT를 함께 설정해 주세요."
+    );
   }
 
   async translateTranscriptToKorean({ transcript, sourceLanguage }) {
@@ -1275,6 +1461,77 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return path.join(basePath, normalizePath(relativePath));
   }
 
+  async requestMacOsSpeechAuthorization(language) {
+    if (typeof process === "undefined" || process.platform !== "darwin") {
+      throw new Error("이 기능은 macOS 데스크톱 환경에서만 사용할 수 있습니다.");
+    }
+
+    const { execFile } = require("child_process");
+    const scriptPath = this.getPluginScriptPath("scripts/macos-transcribe.js");
+    const locale = this.resolveMacLocale(language);
+
+    await new Promise((resolve, reject) => {
+      execFile(
+        "osascript",
+        ["-l", "JavaScript", scriptPath, "--authorize-only", locale],
+        { maxBuffer: 4 * 1024 * 1024 },
+        (error, standardOutput, standardError) => {
+          if (error) {
+            const detail = standardError?.trim() || error.message || "알 수 없는 오류";
+            if (isSpeechPermissionError(detail)) {
+              reject(
+                createTaggedError(
+                  "speech-permission",
+                  "macOS 'Speech Recognition' 권한이 아직 허용되지 않았습니다.",
+                  error
+                )
+              );
+              return;
+            }
+
+            reject(new Error(`Speech Recognition 권한 확인 실패: ${detail}`));
+            return;
+          }
+
+          resolve((standardOutput || standardError || "").trim());
+        }
+      );
+    });
+  }
+
+  async openMacPrivacySettings(target) {
+    if (typeof process === "undefined" || process.platform !== "darwin") {
+      throw new Error("이 기능은 macOS 데스크톱 환경에서만 사용할 수 있습니다.");
+    }
+
+    const { execFile } = require("child_process");
+    const settingsUrl =
+      target === "microphone"
+        ? "x-apple.systempreferences:com.apple.preference.security?Privacy_Microphone"
+        : "x-apple.systempreferences:com.apple.preference.security?Privacy_SpeechRecognition";
+
+    await new Promise((resolve, reject) => {
+      execFile("open", [settingsUrl], (error) => {
+        if (!error) {
+          resolve();
+          return;
+        }
+
+        execFile("open", ["-a", "System Settings"], (fallbackError) => {
+          if (fallbackError) {
+            reject(
+              new Error(
+                "시스템 설정을 열지 못했습니다. 직접 시스템 설정 > 개인정보 보호 및 보안으로 이동해 주세요."
+              )
+            );
+            return;
+          }
+          resolve();
+        });
+      });
+    });
+  }
+
   extractMessageText(messageContent) {
     if (typeof messageContent === "string") {
       return messageContent;
@@ -1738,6 +1995,10 @@ class VoiceSummarySidebarView extends ItemView {
     this.realtimeRecognitionDisabledForSession = false;
     this.liveFinalSegments = [];
     this.liveInterimTranscript = "";
+    this.activeTranscriptChunk = "";
+    this.previewRollingTranscript = "";
+    this.transcriptChunkStartedElapsedMs = 0;
+    this.transcriptChunkStartBufferIndex = 0;
     this.transcriptFeedItems = [];
     this.templateFiles = [];
     this.noteOptions = [];
@@ -1765,6 +2026,7 @@ class VoiceSummarySidebarView extends ItemView {
       savedAudioPath: "",
       statusMessage: DEFAULT_STATUS_MESSAGE,
       statusIsError: false,
+      statusActions: [],
       activeTemplateFolder: "",
       loadedTemplatePath: "",
     };
@@ -1882,6 +2144,12 @@ class VoiceSummarySidebarView extends ItemView {
     });
 
     this.statusEl = root.createDiv({ cls: "voice-workflow-status" });
+    this.statusMessageEl = this.statusEl.createDiv({
+      cls: "voice-workflow-status-message",
+    });
+    this.statusActionsEl = this.statusEl.createDiv({
+      cls: "voice-workflow-status-actions",
+    });
 
     const body = root.createDiv({ cls: "voice-workflow-body" });
     this.transcriptPanelEl = body.createDiv({
@@ -1920,7 +2188,7 @@ class VoiceSummarySidebarView extends ItemView {
     transcriptFeedHeader.createEl("h3", { text: "실시간 전사" });
     transcriptFeedHeader.createEl("span", {
       cls: "voice-workflow-section-caption",
-      text: "녹음 중 문장이 여기 쌓입니다.",
+      text: "현재 구간은 이어서 보이고, 약 50초마다 한 덩어리로 정리됩니다.",
     });
 
     this.transcriptFeedEl = this.transcriptPanelEl.createDiv({
@@ -2076,9 +2344,13 @@ class VoiceSummarySidebarView extends ItemView {
     const summaryFooter = this.summaryPanelEl.createDiv({
       cls: "voice-workflow-summary-footer",
     });
+    this.summaryActionHintEl = summaryFooter.createDiv({
+      cls: "voice-workflow-summary-hint",
+      text: "녹음을 종료하면 전사를 정리한 뒤 요약 저장 버튼이 활성화됩니다.",
+    });
     this.processRecordingButton = summaryFooter.createEl("button", {
       text: "현재 전사 요약 저장",
-      cls: "mod-cta",
+      cls: "mod-cta voice-workflow-primary-button",
     });
     this.processRecordingButton.addEventListener("click", () => {
       void this.handleProcessRecording();
@@ -2101,9 +2373,9 @@ class VoiceSummarySidebarView extends ItemView {
     this.languageSelectEl.addEventListener("change", async () => {
       this.state.sourceLanguage = this.languageSelectEl.value;
       this.plugin.settings.sourceLanguage = this.state.sourceLanguage;
-          await this.plugin.saveSettings();
-          this.setStatus("언어 설정을 저장했습니다.");
-        });
+      await this.plugin.saveSettings();
+      this.setStatus("언어 설정을 저장했습니다.");
+    });
 
     const controlRow = bottomBar.createDiv({
       cls: "voice-workflow-bottom-row voice-workflow-bottom-row-controls",
@@ -2187,7 +2459,25 @@ class VoiceSummarySidebarView extends ItemView {
       return;
     }
 
-    this.statusEl.setText(this.state.statusMessage || DEFAULT_STATUS_MESSAGE);
+    if (this.statusMessageEl) {
+      this.statusMessageEl.setText(
+        this.state.statusMessage || DEFAULT_STATUS_MESSAGE
+      );
+    }
+
+    if (this.statusActionsEl) {
+      this.statusActionsEl.empty();
+      for (const action of this.state.statusActions || []) {
+        const button = this.statusActionsEl.createEl("button", {
+          text: action.label,
+          cls: "voice-workflow-status-action",
+        });
+        button.addEventListener("click", () => {
+          void this.handleStatusAction(action.id);
+        });
+      }
+    }
+
     this.statusEl.toggleClass("is-error", Boolean(this.state.statusIsError));
     this.statusEl.toggleClass("is-muted", !this.state.statusIsError);
   }
@@ -2241,10 +2531,10 @@ class VoiceSummarySidebarView extends ItemView {
       return;
     }
 
-    const interimTranscript = this.liveInterimTranscript.trim();
+    const currentChunkTranscript = this.getActiveTranscriptChunkText();
     this.transcriptFeedEl.empty();
 
-    if (this.transcriptFeedItems.length === 0 && !interimTranscript) {
+    if (this.transcriptFeedItems.length === 0 && !currentChunkTranscript) {
       this.transcriptFeedEl.createDiv({
         cls: "voice-workflow-empty-state",
         text: "녹음을 시작하면 실시간 원문 전사가 여기에 표시됩니다.",
@@ -2266,17 +2556,17 @@ class VoiceSummarySidebarView extends ItemView {
       });
     }
 
-    if (interimTranscript) {
+    if (currentChunkTranscript) {
       const row = this.transcriptFeedEl.createDiv({
         cls: "voice-workflow-feed-row is-interim",
       });
       row.createEl("span", {
         cls: "voice-workflow-feed-time",
-        text: "진행 중",
+        text: this.isRecording ? "현재 구간" : "마지막 구간",
       });
       row.createDiv({
         cls: "voice-workflow-feed-bubble",
-        text: interimTranscript,
+        text: currentChunkTranscript,
       });
     }
 
@@ -2314,10 +2604,67 @@ class VoiceSummarySidebarView extends ItemView {
     }
   }
 
-  setStatus(message, isError = false) {
+  setStatus(message, isError = false, actions = []) {
     this.state.statusMessage = message;
     this.state.statusIsError = isError;
+    this.state.statusActions = Array.isArray(actions) ? actions : [];
     this.updateStatusUi();
+  }
+
+  buildSpeechPermissionActions() {
+    return [
+      { id: "request-speech-permission", label: "권한 다시 확인" },
+      { id: "open-speech-settings", label: "Speech 설정 열기" },
+      { id: "open-microphone-settings", label: "마이크 설정 열기" },
+    ];
+  }
+
+  buildMicrophonePermissionActions() {
+    return [
+      { id: "open-microphone-settings", label: "마이크 설정 열기" },
+      { id: "open-speech-settings", label: "Speech 설정 열기" },
+    ];
+  }
+
+  async handleStatusAction(actionId) {
+    try {
+      if (actionId === "request-speech-permission") {
+        await this.plugin.requestMacOsSpeechAuthorization(this.state.sourceLanguage);
+        this.setStatus(
+          "Speech Recognition 권한 확인 요청을 보냈습니다. 승인 후 다시 녹음을 시작해 보세요."
+        );
+        new Notice("Speech Recognition 권한 확인 요청을 보냈습니다.");
+        return;
+      }
+
+      if (actionId === "open-speech-settings") {
+        await this.plugin.openMacPrivacySettings("speech");
+        this.setStatus(
+          "시스템 설정을 열었습니다. 개인정보 보호 및 보안 > Speech Recognition에서 Obsidian 또는 osascript를 허용하세요.",
+          false,
+          this.buildSpeechPermissionActions()
+        );
+        return;
+      }
+
+      if (actionId === "open-microphone-settings") {
+        await this.plugin.openMacPrivacySettings("microphone");
+        this.setStatus(
+          "시스템 설정을 열었습니다. 개인정보 보호 및 보안 > 마이크에서 Obsidian을 허용하세요.",
+          false,
+          this.buildMicrophonePermissionActions()
+        );
+      }
+    } catch (error) {
+      const actions = isSpeechPermissionError(error)
+        ? this.buildSpeechPermissionActions()
+        : this.state.statusActions;
+      this.setStatus(
+        getErrorText(error) || "권한 관련 작업을 처리하지 못했습니다.",
+        true,
+        actions
+      );
+    }
   }
 
   setBusy(isBusy) {
@@ -2326,6 +2673,12 @@ class VoiceSummarySidebarView extends ItemView {
   }
 
   updateButtonState() {
+    const hasTranscript = Boolean(
+      this.plugin.normalizeText(this.state.finalTranscript || this.getLiveTranscript())
+    );
+    const canProcessRecording =
+      !this.isBusy && Boolean(this.recordedAudioBlob) && hasTranscript;
+
     if (this.startButton) {
       this.startButton.disabled = this.isBusy || this.isRecording;
     }
@@ -2340,13 +2693,53 @@ class VoiceSummarySidebarView extends ItemView {
       this.templateRefreshButton.disabled = this.isBusy;
     }
     if (this.processRecordingButton) {
-      this.processRecordingButton.disabled = this.isBusy || !this.recordedAudioBlob;
+      this.processRecordingButton.disabled = !canProcessRecording;
       this.processRecordingButton.setText(
-        this.plugin.canUseAiSummary() ? "현재 전사 요약 저장" : "전사 초안 저장"
+        this.isBusy
+          ? "전사 정리 중..."
+          : this.plugin.canUseAiSummary()
+            ? "현재 전사 요약 저장"
+            : "전사 초안 저장"
       );
     }
 
+    this.updateSummaryActionUi(hasTranscript, canProcessRecording);
     this.updateTransportUi();
+  }
+
+  updateSummaryActionUi(hasTranscript, canProcessRecording) {
+    if (!this.summaryActionHintEl) {
+      return;
+    }
+
+    let message = "";
+    let stateClass = "is-muted";
+
+    if (this.isBusy && this.isRecording) {
+      message =
+        "녹음 중에는 아직 저장할 수 없어요. 녹음 종료 후 전사를 정리하면 요약 저장이 활성화됩니다.";
+    } else if (this.isBusy) {
+      message = "지금 전사와 오디오를 정리 중입니다. 완료되면 요약 저장 버튼이 활성화돼요.";
+    } else if (this.isRecording) {
+      message = "녹음을 종료하면 최종 전사를 정리한 뒤 요약 저장이 가능해요.";
+    } else if (!this.recordedAudioBlob) {
+      message = "녹음을 먼저 진행해 주세요. 종료 후 요약 저장이 가능해요.";
+    } else if (!hasTranscript) {
+      stateClass = "is-warning";
+      message =
+        "전사 준비 전입니다. 조금 더 길게 말하거나 권한 설정을 확인한 뒤 다시 녹음해 주세요.";
+    } else if (canProcessRecording) {
+      stateClass = "is-ready";
+      message = this.plugin.canUseAiSummary()
+        ? "전사가 준비됐습니다. 템플릿과 저장 대상을 확인한 뒤 요약 저장을 눌러주세요."
+        : "전사가 준비됐습니다. API Key 없이 초안 저장을 진행할 수 있어요.";
+    }
+
+    this.summaryActionHintEl.setText(message);
+    this.summaryActionHintEl.removeClass("is-ready");
+    this.summaryActionHintEl.removeClass("is-warning");
+    this.summaryActionHintEl.removeClass("is-muted");
+    this.summaryActionHintEl.addClass(stateClass);
   }
 
   renderTemplateOptions() {
@@ -2588,17 +2981,18 @@ class VoiceSummarySidebarView extends ItemView {
       return;
     }
 
-    this.liveFinalSegments.push(normalized);
-    this.transcriptFeedItems.push({
-      text: normalized,
-      time: this.formatFeedTimestamp(date),
-    });
-    this.liveInterimTranscript = "";
+    this.activeTranscriptChunk = this.mergeTranscriptProgress(
+      this.activeTranscriptChunk,
+      normalized
+    );
+    this.previewRollingTranscript = this.activeTranscriptChunk;
+    this.commitLiveTranscriptChunkIfNeeded(date);
     this.updateTranscriptUi();
   }
 
   replaceLiveTranscriptSegments(transcript, date = new Date()) {
     const normalized = this.plugin.normalizeText(transcript);
+    this.resetLiveTranscriptChunkState(0, 0);
     this.liveFinalSegments = normalized ? [normalized] : [];
     this.transcriptFeedItems = normalized
       ? [
@@ -2608,6 +3002,121 @@ class VoiceSummarySidebarView extends ItemView {
           },
         ]
       : [];
+    this.liveInterimTranscript = "";
+    this.updateTranscriptUi();
+  }
+
+  getCurrentRecordingElapsedMs() {
+    return (
+      this.recordedElapsedMs +
+      (this.isRecording && !this.isPaused
+        ? Math.max(0, Date.now() - this.recordingStartedAt)
+        : 0)
+    );
+  }
+
+  getActiveTranscriptChunkText() {
+    const stableChunk = this.plugin.normalizeText(this.activeTranscriptChunk);
+    const interimChunk = this.plugin.normalizeText(this.liveInterimTranscript);
+
+    if (!stableChunk) {
+      return interimChunk;
+    }
+    if (!interimChunk) {
+      return stableChunk;
+    }
+
+    return this.mergeTranscriptProgress(stableChunk, interimChunk);
+  }
+
+  resetLiveTranscriptChunkState(startBufferIndex = 0, elapsedMs = 0) {
+    this.activeTranscriptChunk = "";
+    this.previewRollingTranscript = "";
+    this.liveInterimTranscript = "";
+    this.transcriptChunkStartBufferIndex = startBufferIndex;
+    this.transcriptChunkStartedElapsedMs = elapsedMs;
+  }
+
+  commitLiveTranscriptChunk(date = new Date()) {
+    const committedText =
+      this.plugin.normalizeText(this.activeTranscriptChunk) ||
+      this.plugin.normalizeText(this.getActiveTranscriptChunkText());
+    if (!committedText) {
+      return false;
+    }
+
+    this.liveFinalSegments.push(committedText);
+    this.transcriptFeedItems.push({
+      text: committedText,
+      time: this.formatFeedTimestamp(date),
+    });
+    this.resetLiveTranscriptChunkState(
+      this.recordedBuffers.length,
+      this.getCurrentRecordingElapsedMs()
+    );
+    return true;
+  }
+
+  commitLiveTranscriptChunkIfNeeded(date = new Date()) {
+    const currentChunkMs =
+      this.getCurrentRecordingElapsedMs() - this.transcriptChunkStartedElapsedMs;
+    if (currentChunkMs < LIVE_TRANSCRIPT_COMMIT_INTERVAL_MS) {
+      return false;
+    }
+
+    return this.commitLiveTranscriptChunk(date);
+  }
+
+  mergeTranscriptProgress(previousTranscript, nextTranscript) {
+    const previous = this.plugin.inlineValue(previousTranscript);
+    const next = this.plugin.inlineValue(nextTranscript);
+
+    if (!previous) {
+      return next;
+    }
+    if (!next) {
+      return previous;
+    }
+    if (previous === next || next.startsWith(previous)) {
+      return next;
+    }
+    if (previous.endsWith(next)) {
+      return previous;
+    }
+
+    const previousTokens = previous.split(/\s+/).filter(Boolean);
+    const nextTokens = next.split(/\s+/).filter(Boolean);
+    const maxTokenOverlap = Math.min(previousTokens.length, nextTokens.length);
+
+    for (let size = maxTokenOverlap; size >= 2; size -= 1) {
+      const previousTail = previousTokens.slice(-size).join(" ");
+      const nextHead = nextTokens.slice(0, size).join(" ");
+      if (previousTail === nextHead) {
+        return [...previousTokens, ...nextTokens.slice(size)].join(" ");
+      }
+    }
+
+    const maxCharOverlap = Math.min(previous.length, next.length);
+    for (let size = maxCharOverlap; size >= 12; size -= 1) {
+      if (previous.slice(-size) === next.slice(0, size)) {
+        return `${previous}${next.slice(size)}`.trim();
+      }
+    }
+
+    return `${previous} ${next}`.replace(/\s+/g, " ").trim();
+  }
+
+  updateRollingPreviewTranscript(transcript) {
+    const normalized = this.plugin.normalizeText(transcript);
+    if (!normalized) {
+      return;
+    }
+
+    this.previewRollingTranscript = this.mergeTranscriptProgress(
+      this.previewRollingTranscript,
+      normalized
+    );
+    this.activeTranscriptChunk = this.previewRollingTranscript;
     this.liveInterimTranscript = "";
     this.updateTranscriptUi();
   }
@@ -2689,6 +3198,7 @@ class VoiceSummarySidebarView extends ItemView {
       this.recordedElapsedMs = 0;
       this.previewProcessedBufferCount = 0;
       this.previewBusy = false;
+      this.resetLiveTranscriptChunkState(0, 0);
       this.syncUiFromState();
 
       const AudioContextClass = window.AudioContext || window.webkitAudioContext;
@@ -2724,17 +3234,23 @@ class VoiceSummarySidebarView extends ItemView {
         this.setStatus("녹음 중입니다. 실시간 원문 전사를 확인하면서 종료하세요.");
       } else {
         this.setStatus(
-          "녹음 중입니다. 맥 로컬 STT 미리보기로 몇 초 단위 원문 전사를 갱신하고, 종료 시 최종 STT로 한 번 더 정리합니다."
+          "녹음 중입니다. 맥 로컬 STT 미리보기로 현재 구간 전사를 이어서 갱신하고, 약 50초마다 한 덩어리로 정리합니다."
         );
       }
     } catch (error) {
+      const actions = isMicrophonePermissionError(error)
+        ? this.buildMicrophonePermissionActions()
+        : isSpeechPermissionError(error)
+          ? this.buildSpeechPermissionActions()
+          : [];
       await this.stopSpeechRecognition();
       this.teardownRecorder();
       await this.closeAudioContext();
       this.releaseStream();
       this.setStatus(
         `녹음을 시작하지 못했습니다: ${error.message || String(error)}`,
-        true
+        true,
+        actions
       );
       new Notice("녹음을 시작하지 못했습니다.");
     } finally {
@@ -2755,7 +3271,7 @@ class VoiceSummarySidebarView extends ItemView {
       this.setStatus(
         liveRecognitionStarted
           ? "녹음을 다시 시작했습니다."
-          : "녹음을 다시 시작했습니다. 로컬 STT 미리보기로 원문 전사를 계속 갱신합니다."
+          : "녹음을 다시 시작했습니다. 로컬 STT 미리보기로 현재 구간 전사를 계속 이어서 갱신합니다."
       );
       this.updateButtonState();
       return;
@@ -2780,18 +3296,43 @@ class VoiceSummarySidebarView extends ItemView {
       this.setStatus("녹음을 종료하고 최종 전사를 정리하는 중입니다...");
       const audioBlob = await this.stopRecording();
       const createdAt = new Date();
-      const result = await this.finalizeStoppedRecording(audioBlob);
 
       this.recordedAudioBlob = audioBlob;
       this.recordingCreatedAt = createdAt;
+      await this.ensureRecordedAudioSaved(createdAt);
+
+      const result = await this.finalizeStoppedRecording(audioBlob);
+
       this.state.finalTranscript = result.transcript || "";
-      this.state.savedAudioPath = "";
       this.state.translatedTranscript = result.translatedTranscript || "";
-      this.replaceLiveTranscriptSegments(result.transcript, createdAt);
+      if (result.transcript) {
+        this.replaceLiveTranscriptSegments(result.transcript, createdAt);
+      }
 
       if (!this.state.newNoteTitle.trim()) {
         this.state.newNoteTitle =
           this.state.noteTitle.trim() || `음성 메모 ${this.plugin.formatTimestamp(createdAt)}`;
+      }
+
+      if (result.transcriptUnavailable) {
+        this.setActiveTab("transcript");
+        this.syncUiFromState();
+
+        if (isSpeechPermissionError(result.transcriptError)) {
+          this.setStatus(
+            "macOS 'Speech Recognition' 권한이 없어 전사를 건너뛰었습니다. 오디오는 저장됐고, 권한 허용 후 다시 녹음하면 됩니다.",
+            false,
+            this.buildSpeechPermissionActions()
+          );
+          new Notice("Speech Recognition 권한이 없어 오디오만 저장했습니다.");
+        } else {
+          this.setStatus(
+            "음성이 충분히 감지되지 않아 전사를 만들지 못했습니다. 오디오는 저장됐고, 조금 더 길게 다시 녹음하면 됩니다."
+          );
+          new Notice("전사는 비어 있지만 오디오는 저장했습니다.");
+        }
+
+        return;
       }
 
       this.setActiveTab("summary");
@@ -2839,19 +3380,69 @@ class VoiceSummarySidebarView extends ItemView {
     this.setStatus(DEFAULT_STATUS_MESSAGE);
   }
 
+  async ensureRecordedAudioSaved(createdAt) {
+    if (!this.recordedAudioBlob) {
+      return "";
+    }
+
+    let audioPath = this.plugin.normalizeText(this.state.savedAudioPath);
+    const existingAudioFile = audioPath
+      ? this.app.vault.getAbstractFileByPath(audioPath)
+      : null;
+    if (existingAudioFile instanceof TFile) {
+      return audioPath;
+    }
+
+    const activeFile = this.app.workspace.getActiveFile();
+    const audioTitle =
+      this.state.noteTitle.trim() ||
+      this.state.newNoteTitle.trim() ||
+      (activeFile instanceof TFile ? activeFile.basename : "") ||
+      `음성 메모 ${this.plugin.formatTimestamp(createdAt)}`;
+
+    await this.plugin.ensureFolder(this.plugin.settings.audioFolder);
+    audioPath = await this.plugin.getAvailablePath(
+      this.plugin.settings.audioFolder,
+      `${this.plugin.formatFileTimestamp(createdAt)} ${this.plugin.sanitizeFileName(
+        audioTitle
+      )}`,
+      ".wav"
+    );
+    await this.plugin.writeBinaryFile(audioPath, this.recordedAudioBlob);
+    this.state.savedAudioPath = audioPath;
+    return audioPath;
+  }
+
   async finalizeStoppedRecording(audioBlob) {
     let transcriptError = null;
     let transcript = "";
+    const liveTranscript = this.plugin.normalizeText(this.getLiveTranscript());
+    const savedAudioPath = this.plugin.normalizeText(this.state.savedAudioPath);
 
     try {
-      transcript = await this.transcribePreviewChunk(audioBlob);
+      transcript = await this.plugin.transcribeAudio({
+        audioBlob,
+        audioPath: savedAudioPath,
+        language: this.state.sourceLanguage,
+        previewTranscript: liveTranscript,
+      });
     } catch (error) {
       transcriptError = error;
-      transcript = this.getLiveTranscript();
+      transcript = liveTranscript;
     }
 
-    transcript = this.plugin.normalizeText(transcript || this.getLiveTranscript());
+    transcript = this.plugin.normalizeText(transcript || liveTranscript);
     if (!transcript) {
+      if (isRecoverableSpeechError(transcriptError)) {
+        return {
+          transcript: "",
+          translatedTranscript: "",
+          translationError: null,
+          transcriptError,
+          transcriptUnavailable: true,
+        };
+      }
+
       throw transcriptError || new Error("최종 전사 결과가 비어 있습니다.");
     }
 
@@ -2876,6 +3467,8 @@ class VoiceSummarySidebarView extends ItemView {
       transcript,
       translatedTranscript,
       translationError,
+      transcriptError,
+      transcriptUnavailable: false,
     };
   }
 
@@ -3064,13 +3657,13 @@ class VoiceSummarySidebarView extends ItemView {
   clearLiveTranscript(resetDrafts) {
     this.liveFinalSegments = [];
     this.transcriptFeedItems = [];
-    this.liveInterimTranscript = "";
+    this.resetLiveTranscriptChunkState(0, 0);
     this.updateTranscriptUi();
   }
 
   getLiveTranscript() {
     return this.plugin.normalizeText(
-      [this.liveFinalSegments.join("\n"), this.liveInterimTranscript]
+      [this.liveFinalSegments.join("\n\n"), this.getActiveTranscriptChunkText()]
         .filter(Boolean)
         .join("\n")
     );
@@ -3116,16 +3709,40 @@ class VoiceSummarySidebarView extends ItemView {
       return;
     }
 
+    const previewBuffers = this.recordedBuffers.slice(
+      this.transcriptChunkStartBufferIndex,
+      endIndex
+    );
+    if (previewBuffers.length === 0) {
+      return;
+    }
+
     this.previewBusy = true;
 
     try {
-      const previewBlob = this.buildWavBlobFromBuffers(newBuffers);
+      const previewBlob = this.buildWavBlobFromBuffers(previewBuffers);
       const transcript = await this.transcribePreviewChunk(previewBlob);
       if (transcript) {
-        this.appendLiveTranscriptSegment(transcript);
+        this.updateRollingPreviewTranscript(transcript);
+        if (this.commitLiveTranscriptChunkIfNeeded()) {
+          this.updateTranscriptUi();
+        }
       }
       this.previewProcessedBufferCount = endIndex;
     } catch (error) {
+      if (isRecoverableSpeechError(error)) {
+        this.previewProcessedBufferCount = endIndex;
+
+        if (isSpeechPermissionError(error)) {
+          this.setStatus(
+            "macOS 'Speech Recognition' 권한이 없어 실시간 전사를 건너뜁니다. 녹음은 계속됩니다.",
+            false,
+            this.buildSpeechPermissionActions()
+          );
+        }
+        return;
+      }
+
       console.error("Voice Workflow: preview transcription failed", error);
     } finally {
       this.previewBusy = false;
@@ -3133,11 +3750,11 @@ class VoiceSummarySidebarView extends ItemView {
   }
 
   async transcribePreviewChunk(audioBlob) {
-    const provider = this.plugin.settings.sttProvider || "openai";
+    const provider = this.plugin.getResolvedSttProvider();
     const canUseMacPreview =
       typeof process !== "undefined" && process.platform === "darwin";
 
-    if (canUseMacPreview) {
+    if (provider === "macos-speech" && canUseMacPreview) {
       const { promises: fs } = require("fs");
       const os = require("os");
       const path = require("path");
@@ -3162,7 +3779,7 @@ class VoiceSummarySidebarView extends ItemView {
       }
     }
 
-    if (provider === "macos-speech") {
+    if (provider === "windows-speech" || provider === "macos-speech") {
       return "";
     }
 
@@ -3199,7 +3816,7 @@ class VoiceSummarySidebarView extends ItemView {
   }
 
   async startSpeechRecognition() {
-    if (typeof process !== "undefined" && process.platform === "darwin") {
+    if (this.plugin.getResolvedSttProvider() === "macos-speech") {
       this.realtimeRecognitionDisabledForSession = true;
       return false;
     }
@@ -3248,6 +3865,7 @@ class VoiceSummarySidebarView extends ItemView {
         }
       }
 
+      this.commitLiveTranscriptChunkIfNeeded();
       this.liveInterimTranscript = interimParts.join(" ");
       this.updateTranscriptUi();
     };
@@ -3499,17 +4117,26 @@ class VoiceSummaryWorkflowSettingTab extends PluginSettingTab {
 
     new Setting(containerEl)
       .setName("STT Provider")
-      .setDesc("저장 후 보정 STT에 사용됩니다. macOS에서는 로컬 Speech.framework를 쓸 수 있습니다.")
-      .addDropdown((dropdown) =>
+      .setDesc("Auto는 macOS에서 로컬 Speech, Windows에서 실시간 Speech 누적본, 그 외에는 OpenAI STT를 기본 경로로 사용합니다.")
+      .addDropdown((dropdown) => {
+        for (const option of this.plugin.getSttProviderOptions()) {
+          dropdown.addOption(option.value, option.label);
+        }
+
         dropdown
-          .addOption("macos-speech", "macOS Local Speech")
-          .addOption("openai", "OpenAI Compatible API")
-          .setValue(this.plugin.settings.sttProvider)
+          .setValue(this.plugin.getConfiguredSttProvider())
           .onChange(async (value) => {
             this.plugin.settings.sttProvider = value;
             await this.plugin.saveSettings();
-          })
-      );
+            this.display();
+          });
+      });
+
+    containerEl.createEl("p", {
+      text: `현재 STT 경로: ${this.plugin.getSttProviderLabel(
+        this.plugin.getConfiguredSttProvider()
+      )} -> ${this.plugin.getSttProviderLabel(this.plugin.getResolvedSttProvider())}`,
+    });
 
     new Setting(containerEl)
       .setName("기본 전사 언어")
