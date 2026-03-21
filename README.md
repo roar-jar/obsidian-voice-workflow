@@ -1,5 +1,9 @@
 # Voice Workflow
 
+[![GitHub Repo](https://img.shields.io/badge/GitHub-roar--jar%2Fobsidian--voice--workflow-181717?logo=github)](https://github.com/roar-jar/obsidian-voice-workflow)
+[![License](https://img.shields.io/github/license/roar-jar/obsidian-voice-workflow)](LICENSE)
+[![Last Commit](https://img.shields.io/github/last-commit/roar-jar/obsidian-voice-workflow)](https://github.com/roar-jar/obsidian-voice-workflow/commits/main)
+
 Obsidian 우측 사이드바에서 음성 녹음, 실시간 전사, 템플릿 기반 요약, 원문 보관을 처리하는 플러그인입니다.
 
 ## 화면 미리보기
