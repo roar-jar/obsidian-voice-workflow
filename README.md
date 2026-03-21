@@ -2,6 +2,15 @@
 
 Obsidian 우측 사이드바에서 음성 녹음, 실시간 전사, 템플릿 기반 요약, 원문 보관을 처리하는 플러그인입니다.
 
+![Voice Workflow overview](assets/readme/voice-workflow-overview.png)
+
+## 화면 미리보기
+
+- 전체 워크플로우: 우측 패널에서 녹음과 전사를 확인하고, 중앙 노트에는 템플릿 요약과 원문 아카이브를 함께 저장합니다.
+- 빠른 시작 데모:
+
+![Voice Workflow quick start](assets/readme/voice-workflow-quick-start.gif)
+
 ## 핵심 기능
 
 - 우측 패널에서 `녹음 시작`, `일시정지`, `녹음 종료`
@@ -128,3 +137,7 @@ tags:
   - `node --check main.js`
   - Obsidian 재시작 후 패널 로드 확인
   - 녹음, 저장, 요약, 아카이브 저장 확인
+
+## 라이선스
+
+MIT License. 자세한 내용은 `LICENSE` 파일을 확인하세요.
