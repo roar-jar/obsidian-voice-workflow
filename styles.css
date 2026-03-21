@@ -1,0 +1,498 @@
+.voice-summary-view {
+  height: 100%;
+  overflow: hidden;
+}
+
+.voice-workflow-shell {
+  --vw-bg: color-mix(in srgb, var(--background-primary) 88%, black);
+  --vw-panel: color-mix(in srgb, var(--background-secondary) 84%, black);
+  --vw-panel-strong: color-mix(in srgb, var(--background-secondary-alt) 78%, black);
+  --vw-border: color-mix(in srgb, var(--background-modifier-border) 70%, #3f3f46);
+  --vw-chip: color-mix(in srgb, var(--background-secondary-alt) 72%, black);
+  --vw-chip-active: color-mix(in srgb, var(--interactive-accent) 28%, #0b0b0e);
+  --vw-feed: color-mix(in srgb, var(--background-primary-alt) 68%, black);
+  --vw-muted: color-mix(in srgb, var(--text-muted) 85%, #a1a1aa);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+  padding: 0.75rem;
+  background:
+    radial-gradient(circle at top right, rgba(34, 197, 94, 0.14), transparent 28%),
+    radial-gradient(circle at bottom left, rgba(59, 130, 246, 0.12), transparent 24%),
+    var(--vw-bg);
+}
+
+.voice-workflow-header {
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.voice-workflow-header-copy h2 {
+  margin: 0;
+  font-size: 1.15rem;
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.voice-workflow-header-text {
+  margin: 0.3rem 0 0;
+  color: var(--vw-muted);
+  line-height: 1.45;
+}
+
+.voice-workflow-tabs {
+  display: inline-flex;
+  align-self: flex-start;
+  gap: 0.35rem;
+  padding: 0.25rem;
+  border: 1px solid var(--vw-border);
+  border-radius: 999px;
+  background: rgba(0, 0, 0, 0.24);
+}
+
+.voice-workflow-tab-button,
+.voice-workflow-chip,
+.voice-workflow-inline-button {
+  appearance: none;
+  border: 1px solid transparent;
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-normal);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    transform 120ms ease;
+}
+
+.voice-workflow-tab-button {
+  padding: 0.45rem 0.85rem;
+  font-size: 0.92rem;
+  font-weight: 600;
+  color: var(--vw-muted);
+}
+
+.voice-workflow-tab-button.is-active {
+  background: var(--vw-chip-active);
+  border-color: color-mix(in srgb, var(--interactive-accent) 45%, transparent);
+  color: var(--text-normal);
+}
+
+.voice-workflow-status {
+  border: 1px solid var(--vw-border);
+  border-radius: 16px;
+  padding: 0.8rem 0.9rem;
+  background: rgba(0, 0, 0, 0.22);
+  line-height: 1.45;
+}
+
+.voice-workflow-status.is-error {
+  color: var(--text-error);
+  border-color: color-mix(in srgb, var(--text-error) 48%, var(--vw-border));
+}
+
+.voice-workflow-status.is-muted {
+  color: var(--vw-muted);
+}
+
+.voice-workflow-body {
+  min-height: 0;
+  flex: 1 1 auto;
+  display: flex;
+}
+
+.voice-workflow-panel {
+  min-height: 0;
+  flex: 1 1 auto;
+  overflow: auto;
+  border: 1px solid var(--vw-border);
+  border-radius: 22px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 28%),
+    var(--vw-panel);
+  padding: 0.95rem;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.025);
+}
+
+.voice-workflow-transport {
+  display: grid;
+  grid-template-columns: auto auto 1fr;
+  gap: 0.6rem;
+  align-items: center;
+  margin-bottom: 0.75rem;
+  padding: 0.85rem 0.9rem;
+  border-radius: 18px;
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.voice-workflow-transport-state {
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  background: var(--vw-chip);
+  color: var(--vw-muted);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.voice-workflow-transport-state.is-recording {
+  background: rgba(34, 197, 94, 0.18);
+  color: #86efac;
+}
+
+.voice-workflow-transport-state.is-paused {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fcd34d;
+}
+
+.voice-workflow-transport-state.is-ready {
+  background: rgba(59, 130, 246, 0.18);
+  color: #93c5fd;
+}
+
+.voice-workflow-transport-time {
+  font-size: 1rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+}
+
+.voice-workflow-transport-meta {
+  color: var(--vw-muted);
+  font-size: 0.88rem;
+  text-align: right;
+  word-break: break-word;
+}
+
+.voice-workflow-track {
+  position: relative;
+  overflow: hidden;
+  height: 0.5rem;
+  margin-bottom: 0.95rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+}
+
+.voice-workflow-track-fill {
+  height: 100%;
+  width: 0%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #14b8a6, #22c55e);
+  transition: width 180ms ease;
+}
+
+.voice-workflow-track-fill.is-animated {
+  box-shadow: 0 0 20px rgba(34, 197, 94, 0.35);
+}
+
+.voice-workflow-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.75rem;
+  margin-bottom: 0.65rem;
+}
+
+.voice-workflow-section-header h3,
+.voice-workflow-section-header h4 {
+  margin: 0;
+  font-size: 0.98rem;
+}
+
+.voice-workflow-section-caption {
+  color: var(--vw-muted);
+  font-size: 0.82rem;
+}
+
+.voice-workflow-feed {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
+}
+
+.voice-workflow-feed-row {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  align-items: start;
+  gap: 0.55rem;
+}
+
+.voice-workflow-feed-time {
+  align-self: center;
+  padding: 0.18rem 0.45rem;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.06);
+  color: var(--vw-muted);
+  font-size: 0.78rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.voice-workflow-feed-bubble {
+  padding: 0.72rem 0.8rem;
+  border: 1px solid color-mix(in srgb, var(--vw-border) 80%, transparent);
+  border-radius: 14px;
+  background: var(--vw-feed);
+  line-height: 1.5;
+  word-break: keep-all;
+}
+
+.voice-workflow-feed-row.is-interim .voice-workflow-feed-bubble {
+  border-style: dashed;
+  color: var(--vw-muted);
+}
+
+.voice-workflow-empty-state {
+  padding: 1rem;
+  border: 1px dashed var(--vw-border);
+  border-radius: 16px;
+  color: var(--vw-muted);
+  text-align: center;
+  line-height: 1.5;
+}
+
+.voice-workflow-summary-meta,
+.voice-workflow-template-preview {
+  margin-bottom: 0.9rem;
+  padding: 0.85rem 0.9rem;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  color: var(--vw-muted);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+.voice-workflow-template-preview.is-placeholder {
+  color: color-mix(in srgb, var(--vw-muted) 78%, #9ca3af);
+}
+
+.voice-workflow-summary-section {
+  margin-bottom: 1rem;
+}
+
+.voice-workflow-help {
+  margin: 0 0 0.7rem;
+  color: var(--vw-muted);
+  font-size: 0.85rem;
+  line-height: 1.45;
+}
+
+.voice-workflow-chip-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+}
+
+.voice-workflow-chip {
+  padding: 0.42rem 0.72rem;
+  background: var(--vw-chip);
+  color: var(--vw-muted);
+  font-size: 0.86rem;
+  font-weight: 600;
+}
+
+.voice-workflow-chip.is-active {
+  background: var(--vw-chip-active);
+  border-color: color-mix(in srgb, var(--interactive-accent) 50%, transparent);
+  color: var(--text-normal);
+}
+
+.voice-workflow-inline-button {
+  padding: 0.35rem 0.65rem;
+  background: rgba(255, 255, 255, 0.04);
+  color: var(--vw-muted);
+}
+
+.voice-workflow-advanced {
+  margin-top: 0.35rem;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  padding-top: 0.8rem;
+}
+
+.voice-workflow-advanced summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--vw-muted);
+}
+
+.voice-workflow-advanced-body {
+  margin-top: 0.6rem;
+}
+
+.voice-workflow-summary-footer {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 1rem;
+}
+
+.voice-workflow-bottombar {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0.75rem;
+  border: 1px solid var(--vw-border);
+  border-radius: 20px;
+  padding: 0.65rem 0.75rem;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent),
+    var(--vw-panel-strong);
+}
+
+.voice-workflow-bottom-row {
+  display: flex;
+  align-items: center;
+  gap: 0.55rem;
+  min-width: 0;
+  width: 100%;
+}
+
+.voice-workflow-bottom-label {
+  flex: 0 0 2.6rem;
+  color: var(--vw-muted);
+  font-size: 0.82rem;
+  font-weight: 700;
+}
+
+.voice-workflow-language-select {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.voice-workflow-recorder-controls {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  align-items: stretch;
+  gap: 0.45rem;
+  width: 100%;
+  min-width: 0;
+}
+
+.voice-workflow-recorder-controls button {
+  min-width: 0;
+  width: 100%;
+}
+
+.voice-summary-field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  margin-top: 0.85rem;
+}
+
+.voice-summary-label {
+  font-weight: 600;
+}
+
+.voice-summary-field-description {
+  margin: 0;
+  color: var(--vw-muted);
+  font-size: 0.84rem;
+  line-height: 1.45;
+}
+
+.voice-summary-field input,
+.voice-summary-field select,
+.voice-summary-textarea,
+.voice-summary-file-select,
+.voice-workflow-language-select {
+  width: 100%;
+}
+
+.voice-summary-textarea,
+.voice-summary-field input,
+.voice-summary-field select,
+.voice-summary-file-select,
+.voice-workflow-language-select {
+  border: 1px solid var(--vw-border);
+  border-radius: 14px;
+  background: rgba(0, 0, 0, 0.18);
+  color: var(--text-normal);
+}
+
+.voice-summary-textarea,
+.voice-summary-field input {
+  padding: 0.75rem 0.8rem;
+}
+
+.voice-summary-field select,
+.voice-summary-file-select,
+.voice-workflow-language-select {
+  padding: 0.65rem 0.75rem;
+}
+
+.voice-summary-textarea {
+  min-height: 8rem;
+  resize: vertical;
+  line-height: 1.5;
+}
+
+.voice-summary-template {
+  min-height: 7.5rem;
+}
+
+.voice-summary-file-select {
+  min-height: 11rem;
+}
+
+.voice-summary-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 2.2rem;
+}
+
+.voice-summary-toggle label {
+  margin: 0;
+}
+
+.voice-summary-setting textarea {
+  min-height: 18rem;
+  width: 100%;
+}
+
+.is-hidden {
+  display: none !important;
+}
+
+@media (max-width: 720px) {
+  .voice-workflow-shell {
+    padding: 0.65rem;
+  }
+
+  .voice-workflow-header,
+  .voice-workflow-bottombar,
+  .voice-workflow-transport {
+    gap: 0.6rem;
+  }
+
+  .voice-workflow-transport {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .voice-workflow-bottom-row {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .voice-workflow-bottom-label {
+    flex: 0 0 auto;
+  }
+
+  .voice-workflow-recorder-controls {
+    width: 100%;
+  }
+
+  .voice-workflow-recorder-controls button {
+    flex: 1 1 0;
+  }
+
+  .voice-workflow-transport {
+    grid-template-columns: 1fr;
+  }
+
+  .voice-workflow-transport-meta {
+    text-align: left;
+  }
+}
