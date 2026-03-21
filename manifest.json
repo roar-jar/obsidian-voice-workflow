@@ -1,10 +1,10 @@
 {
   "id": "voice-summary-workflow",
-  "name": "Voice Summary Workflow",
-  "version": "0.2.0",
+  "name": "Voice Workflow",
+  "version": "0.3.0",
   "minAppVersion": "1.5.12",
   "description": "Right-sidebar voice workflow for live transcript capture, raw-text preservation, template-based summaries, and file-focused final editing in Obsidian.",
-  "author": "OpenAI Codex",
-  "authorUrl": "https://openai.com",
+  "author": "roar-jar",
+  "authorUrl": "https://github.com/roar-jar",
   "isDesktopOnly": true
 }

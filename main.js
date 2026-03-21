@@ -288,6 +288,7 @@ const DEFAULT_SETTINGS = {
   summaryTemplate: DEFAULT_SUMMARY_TEMPLATE,
   noteFolder: "Voice Workflow/Notes",
   audioFolder: "Voice Workflow/Audio",
+  openSidebarOnStartup: false,
   lastLoadedAt: "",
 };
 
@@ -308,7 +309,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
     this.addCommand({
       id: "open-voice-summary-workflow-sidebar",
-      name: "Voice Workflow 열기",
+      name: "사이드바 열기",
       callback: () => {
         void this.activateView();
       },
@@ -316,7 +317,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
     this.addCommand({
       id: "open-voice-summary-workflow",
-      name: "Voice Workflow 열기 (기존 명령 호환)",
+      name: "사이드바 열기 (기존 명령 호환)",
       callback: () => {
         void this.activateView();
       },
@@ -325,7 +326,9 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     this.addSettingTab(new VoiceSummaryWorkflowSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
-      void this.activateView();
+      if (this.settings.openSidebarOnStartup) {
+        void this.activateView();
+      }
     });
   }
 
@@ -4153,6 +4156,18 @@ class VoiceSummaryWorkflowSettingTab extends PluginSettingTab {
             await this.plugin.saveSettings();
           });
       });
+
+    new Setting(containerEl)
+      .setName("시작 시 사이드바 자동 열기")
+      .setDesc("플러그인 로드 직후 Voice Workflow 우측 패널을 자동으로 엽니다. 기본값은 꺼짐입니다.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(Boolean(this.plugin.settings.openSidebarOnStartup))
+          .onChange(async (value) => {
+            this.plugin.settings.openSidebarOnStartup = value;
+            await this.plugin.saveSettings();
+          })
+      );
 
     new Setting(containerEl)
       .setName("기본 번역 옵션")
