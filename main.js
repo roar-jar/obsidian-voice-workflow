@@ -1,6 +1,8 @@
 const {
+  FileSystemAdapter,
   ItemView,
   Notice,
+  Platform,
   Plugin,
   PluginSettingTab,
   Setting,
@@ -26,6 +28,9 @@ const DEFAULT_SUMMARY_TEMPLATE = [
   "- ",
 ].join("\n");
 
+const DEFAULT_CONSENT_MESSAGE =
+  "이 회의는 Voice Workflow로 녹음 및 전사하여 회의록을 작성하려고 합니다. 녹음과 전사에 동의하시나요?";
+
 const DEFAULT_STATUS_MESSAGE =
   "우측 패널에서 녹음한 뒤 템플릿과 저장 노트를 선택해 요약을 만들 수 있습니다.";
 
@@ -36,11 +41,54 @@ const TRANSCRIPT_HEADING = "원문 전사";
 const TRANSLATED_TRANSCRIPT_HEADING = "번역 전사 (한국어)";
 const SUMMARY_HEADING = "템플릿 요약";
 const LIVE_TRANSCRIPT_COMMIT_INTERVAL_MS = 50 * 1000;
+const PREVIEW_TRANSCRIPT_INTERVAL_MS = 12 * 1000;
+const PREVIEW_TRANSCRIPT_MIN_SECONDS = 6;
+const AUDIO_PROCESSOR_BUFFER_SIZE = 16384;
+const MAX_TRANSCRIPT_FEED_ITEMS = 80;
 
 const AI_PROVIDER_OPTIONS = [
   { value: "openai", label: "OpenAI Compatible" },
+  { value: "ollama", label: "Ollama Local" },
   { value: "anthropic", label: "Claude (Anthropic)" },
   { value: "gemini", label: "Gemini (Google)" },
+];
+
+const AGENT_INSTRUCTION_OPTIONS = [
+  {
+    value: "auto",
+    label: "자동",
+    prompt:
+      "회의 유형을 스스로 판단하고, 논의 맥락에 맞게 핵심 요약, 결정사항, 실행 항목, 후속 질문을 균형 있게 정리한다.",
+  },
+  {
+    value: "meeting",
+    label: "일반 회의",
+    prompt:
+      "일반 업무 회의록으로 정리한다. 논의 배경, 핵심 쟁점, 결정사항, 실행 항목, 담당자, 기한, 미해결 질문을 분리한다.",
+  },
+  {
+    value: "lecture",
+    label: "강의/수업",
+    prompt:
+      "강의 노트로 정리한다. 개념, 예시, 교수자 강조점, 학생이 복습할 질문, 과제나 다음 수업 준비 항목을 분리한다.",
+  },
+  {
+    value: "one-on-one",
+    label: "1:1",
+    prompt:
+      "1:1 미팅 기록으로 정리한다. 상태 공유, 고민, 피드백, 합의한 다음 행동, 민감한 내용의 표현 수위를 조심스럽게 정리한다.",
+  },
+  {
+    value: "decision",
+    label: "의사결정",
+    prompt:
+      "의사결정 회의록으로 정리한다. 선택지, 판단 근거, 최종 결정, 반대 의견, 리스크, 후속 검증 항목을 명확히 구분한다.",
+  },
+  {
+    value: "custom",
+    label: "커스텀",
+    prompt: "",
+  },
 ];
 
 const STT_PROVIDER_OPTIONS = [
@@ -54,6 +102,14 @@ const AI_PROVIDER_MAP = AI_PROVIDER_OPTIONS.reduce((accumulator, option) => {
   accumulator[option.value] = option;
   return accumulator;
 }, {});
+
+const AGENT_INSTRUCTION_MAP = AGENT_INSTRUCTION_OPTIONS.reduce(
+  (accumulator, option) => {
+    accumulator[option.value] = option;
+    return accumulator;
+  },
+  {}
+);
 
 const STT_PROVIDER_MAP = STT_PROVIDER_OPTIONS.reduce((accumulator, option) => {
   accumulator[option.value] = option;
@@ -136,15 +192,11 @@ function getDefaultSttProvider() {
 }
 
 function getPlatformSttProvider() {
-  if (typeof process === "undefined") {
-    return "openai";
-  }
-
-  if (process.platform === "darwin") {
+  if (Platform.isMacOS) {
     return "macos-speech";
   }
 
-  if (process.platform === "win32") {
+  if (Platform.isWin) {
     return "windows-speech";
   }
 
@@ -159,6 +211,11 @@ function normalizeSttProvider(value) {
 function normalizeAiProvider(value) {
   const raw = String(value || "").trim().toLowerCase();
   return AI_PROVIDER_MAP[raw] ? raw : "openai";
+}
+
+function normalizeAgentInstruction(value) {
+  const raw = String(value || "").trim().toLowerCase();
+  return AGENT_INSTRUCTION_MAP[raw] ? raw : "meeting";
 }
 
 function normalizeLanguageKey(value) {
@@ -274,6 +331,8 @@ const DEFAULT_SETTINGS = {
   openAiApiBaseUrl: "https://api.openai.com/v1",
   openAiTranscriptionModel: "gpt-4o-mini-transcribe",
   openAiSummaryModel: "gpt-4o-mini",
+  ollamaApiBaseUrl: "http://localhost:11434",
+  ollamaModel: "qwen3",
   anthropicApiKey: "",
   anthropicApiBaseUrl: "https://api.anthropic.com/v1",
   anthropicModel: "claude-sonnet-4-20250514",
@@ -286,21 +345,33 @@ const DEFAULT_SETTINGS = {
   selectedTemplatePath: "",
   customSummaryTemplate: DEFAULT_SUMMARY_TEMPLATE,
   summaryTemplate: DEFAULT_SUMMARY_TEMPLATE,
+  defaultAgentInstruction: "meeting",
+  customAgentInstruction: "",
+  requireConsentBeforeRecording: true,
+  consentMessage: DEFAULT_CONSENT_MESSAGE,
   noteFolder: "Voice Workflow/Notes",
   audioFolder: "Voice Workflow/Audio",
   openSidebarOnStartup: false,
-  lastLoadedAt: "",
 };
 
 module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
   async onload() {
     await this.loadSettings();
-    this.settings.lastLoadedAt = new Date().toISOString();
-    await this.saveSettings();
+    this.markdownFileCache = null;
 
     this.registerView(
       VIEW_TYPE,
       (leaf) => new VoiceSummarySidebarView(leaf, this)
+    );
+
+    this.registerEvent(
+      this.app.vault.on("create", () => this.invalidateMarkdownFileCache())
+    );
+    this.registerEvent(
+      this.app.vault.on("delete", () => this.invalidateMarkdownFileCache())
+    );
+    this.registerEvent(
+      this.app.vault.on("rename", () => this.invalidateMarkdownFileCache())
     );
 
     this.addRibbonIcon("mic", "Voice Workflow 열기", () => {
@@ -334,6 +405,10 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   onunload() {
     this.app.workspace.detachLeavesOfType(VIEW_TYPE);
+  }
+
+  invalidateMarkdownFileCache() {
+    this.markdownFileCache = null;
   }
 
   async activateView() {
@@ -383,8 +458,16 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         loaded.openAiSummaryModel ||
         loaded.summaryModel ||
         DEFAULT_SETTINGS.openAiSummaryModel,
+      ollamaApiBaseUrl:
+        loaded.ollamaApiBaseUrl || DEFAULT_SETTINGS.ollamaApiBaseUrl,
+      ollamaModel: loaded.ollamaModel || DEFAULT_SETTINGS.ollamaModel,
       customSummaryTemplate,
       summaryTemplate: customSummaryTemplate,
+      defaultAgentInstruction: normalizeAgentInstruction(
+        loaded.defaultAgentInstruction || DEFAULT_SETTINGS.defaultAgentInstruction
+      ),
+      consentMessage:
+        loaded.consentMessage || DEFAULT_SETTINGS.consentMessage,
     });
   }
 
@@ -404,6 +487,11 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     this.settings.openAiSummaryModel =
       String(this.settings.openAiSummaryModel || "").trim() ||
       DEFAULT_SETTINGS.openAiSummaryModel;
+    this.settings.ollamaApiBaseUrl =
+      String(this.settings.ollamaApiBaseUrl || "").trim() ||
+      DEFAULT_SETTINGS.ollamaApiBaseUrl;
+    this.settings.ollamaModel =
+      String(this.settings.ollamaModel || "").trim() || DEFAULT_SETTINGS.ollamaModel;
     this.settings.anthropicApiKey = String(this.settings.anthropicApiKey || "").trim();
     this.settings.anthropicApiBaseUrl =
       String(this.settings.anthropicApiBaseUrl || "").trim() ||
@@ -417,6 +505,18 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       DEFAULT_SETTINGS.geminiApiBaseUrl;
     this.settings.geminiModel =
       String(this.settings.geminiModel || "").trim() || DEFAULT_SETTINGS.geminiModel;
+    this.settings.defaultAgentInstruction = normalizeAgentInstruction(
+      this.settings.defaultAgentInstruction
+    );
+    this.settings.customAgentInstruction = String(
+      this.settings.customAgentInstruction || ""
+    ).trim();
+    this.settings.consentMessage =
+      String(this.settings.consentMessage || "").trim() ||
+      DEFAULT_SETTINGS.consentMessage;
+    this.settings.requireConsentBeforeRecording = Boolean(
+      this.settings.requireConsentBeforeRecording
+    );
     // Keep legacy keys in sync for backward compatibility with older data files.
     this.settings.apiKey = this.settings.openAiApiKey;
     this.settings.apiBaseUrl = this.settings.openAiApiBaseUrl;
@@ -446,15 +546,11 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     }
 
     if (configured === "macos-speech") {
-      return typeof process !== "undefined" && process.platform === "darwin"
-        ? configured
-        : "openai";
+      return Platform.isMacOS ? configured : "openai";
     }
 
     if (configured === "windows-speech") {
-      return typeof process !== "undefined" && process.platform === "win32"
-        ? configured
-        : "openai";
+      return Platform.isWin ? configured : "openai";
     }
 
     return configured;
@@ -471,12 +567,27 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return AI_PROVIDER_OPTIONS;
   }
 
+  getAgentInstructionOptions() {
+    return AGENT_INSTRUCTION_OPTIONS;
+  }
+
   getAiProviderLabel(value) {
     return AI_PROVIDER_MAP[normalizeAiProvider(value)]?.label || AI_PROVIDER_MAP.openai.label;
   }
 
+  getAgentInstructionLabel(value) {
+    return (
+      AGENT_INSTRUCTION_MAP[normalizeAgentInstruction(value)]?.label ||
+      AGENT_INSTRUCTION_MAP.meeting.label
+    );
+  }
+
   getActiveAiProvider() {
     return normalizeAiProvider(this.settings.aiProvider);
+  }
+
+  providerRequiresApiKey(provider = this.getActiveAiProvider()) {
+    return normalizeAiProvider(provider) !== "ollama";
   }
 
   getActiveAiApiKey() {
@@ -485,6 +596,8 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         return String(this.settings.anthropicApiKey || "").trim();
       case "gemini":
         return String(this.settings.geminiApiKey || "").trim();
+      case "ollama":
+        return "";
       case "openai":
       default:
         return String(this.settings.openAiApiKey || "").trim();
@@ -497,10 +610,24 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         return String(this.settings.anthropicModel || "").trim();
       case "gemini":
         return String(this.settings.geminiModel || "").trim();
+      case "ollama":
+        return String(this.settings.ollamaModel || "").trim();
       case "openai":
       default:
         return String(this.settings.openAiSummaryModel || "").trim();
     }
+  }
+
+  getAiUnavailableReason() {
+    const provider = this.getActiveAiProvider();
+    const label = this.getAiProviderLabel(provider);
+    if (!this.getActiveAiModel()) {
+      return `${label} 모델이 설정되지 않았습니다.`;
+    }
+    if (this.providerRequiresApiKey(provider) && !this.getActiveAiApiKey()) {
+      return `${label} API Key가 설정되지 않았습니다.`;
+    }
+    return "";
   }
 
   getOpenAiApiKey() {
@@ -514,11 +641,32 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     );
   }
 
+  getOllamaApiBaseUrl() {
+    return (
+      String(this.settings.ollamaApiBaseUrl || "").trim() ||
+      DEFAULT_SETTINGS.ollamaApiBaseUrl
+    );
+  }
+
   getOpenAiTranscriptionModel() {
     return (
       String(this.settings.openAiTranscriptionModel || "").trim() ||
       DEFAULT_SETTINGS.openAiTranscriptionModel
     );
+  }
+
+  getResolvedSttModelLabel() {
+    const provider = this.getResolvedSttProvider();
+    if (provider === "openai") {
+      return this.getOpenAiTranscriptionModel();
+    }
+    if (provider === "macos-speech") {
+      return "macOS Speech.framework";
+    }
+    if (provider === "windows-speech") {
+      return "Windows SpeechRecognition";
+    }
+    return provider;
   }
 
   getLanguageLabel(value) {
@@ -699,7 +847,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       }
     }
 
-    await this.app.vault.modify(noteFile, normalizedContent);
+    await this.app.vault.process(noteFile, () => normalizedContent);
 
     for (const view of openViews) {
       if (typeof view.save === "function") {
@@ -708,9 +856,66 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     }
   }
 
+  async applyFrontmatterEntriesToFile(noteFile, entries) {
+    const normalizedEntries = Array.isArray(entries)
+      ? entries.filter((entry) => entry && entry.key)
+      : [];
+
+    if (normalizedEntries.length === 0) {
+      return;
+    }
+
+    await this.app.fileManager.processFrontMatter(noteFile, (frontmatter) => {
+      for (const entry of normalizedEntries) {
+        frontmatter[entry.key] = this.getFrontmatterEntryData(entry);
+      }
+    });
+  }
+
+  getFrontmatterEntryData(entry) {
+    if (Object.prototype.hasOwnProperty.call(entry, "data")) {
+      return entry.data;
+    }
+    return this.parseFrontmatterEntryValue(entry.value);
+  }
+
+  parseFrontmatterEntryValue(value) {
+    const raw = String(value ?? "").trim();
+    if (!raw) {
+      return "";
+    }
+    if (raw === "true") {
+      return true;
+    }
+    if (raw === "false") {
+      return false;
+    }
+    if (raw === "[]") {
+      return [];
+    }
+    if (/^-?\d+(?:\.\d+)?$/.test(raw)) {
+      return Number(raw);
+    }
+    if (raw.startsWith('"') && raw.endsWith('"')) {
+      try {
+        return JSON.parse(raw);
+      } catch (error) {
+        return raw.slice(1, -1);
+      }
+    }
+    return raw;
+  }
+
   appendRecordingToNote(
     content,
-    { createdAt, topic, audioPath, sourceLanguage, transcript, translatedTranscript }
+    {
+      createdAt,
+      topic,
+      audioPath,
+      sourceLanguage,
+      transcript,
+      translatedTranscript,
+    }
   ) {
     const entry = this.buildRecordingArchiveEntry({
       createdAt,
@@ -776,25 +981,37 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       throw new Error("OpenAI API Key가 설정되지 않았습니다.");
     }
 
-    const formData = new FormData();
-    formData.append("file", audioBlob, filename);
-    formData.append("model", this.getOpenAiTranscriptionModel());
-    formData.append("response_format", "json");
-
+    const fields = [
+      { name: "model", value: this.getOpenAiTranscriptionModel() },
+      { name: "response_format", value: "json" },
+    ];
     const resolvedLanguage = this.resolveOpenAiLanguage(language);
     if (resolvedLanguage) {
-      formData.append("language", resolvedLanguage);
+      fields.push({ name: "language", value: resolvedLanguage });
     }
 
-    const response = await fetch(this.buildOpenAiApiUrl("/audio/transcriptions"), {
+    const multipart = await this.buildMultipartBody({
+      fields,
+      file: {
+        name: "file",
+        filename,
+        blob: audioBlob,
+        contentType: audioBlob.type || "audio/wav",
+      },
+    });
+
+    const response = await requestUrl({
+      url: this.buildOpenAiApiUrl("/audio/transcriptions"),
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
+        "Content-Type": multipart.contentType,
       },
-      body: formData,
+      body: multipart.body,
+      throw: false,
     });
 
-    const data = await this.parseApiResponse(response, "STT 요청");
+    const data = await this.parseRequestUrlResponse(response, "STT 요청");
     const transcript = typeof data.text === "string" ? data.text.trim() : "";
 
     if (!transcript) {
@@ -804,8 +1021,54 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return transcript;
   }
 
+  async buildMultipartBody({ fields, file }) {
+    const boundary = `----voice-workflow-${Date.now()}-${Math.random()
+      .toString(16)
+      .slice(2)}`;
+    const encoder = new TextEncoder();
+    const chunks = [];
+    const pushString = (value) => {
+      chunks.push(encoder.encode(value));
+    };
+
+    for (const field of fields || []) {
+      pushString(`--${boundary}\r\n`);
+      pushString(
+        `Content-Disposition: form-data; name="${this.escapeHeaderValue(
+          field.name
+        )}"\r\n\r\n`
+      );
+      pushString(`${String(field.value || "")}\r\n`);
+    }
+
+    const fileBuffer = await file.blob.arrayBuffer();
+    pushString(`--${boundary}\r\n`);
+    pushString(
+      `Content-Disposition: form-data; name="${this.escapeHeaderValue(
+        file.name
+      )}"; filename="${this.escapeHeaderValue(file.filename)}"\r\n`
+    );
+    pushString(`Content-Type: ${file.contentType || "application/octet-stream"}\r\n\r\n`);
+    chunks.push(new Uint8Array(fileBuffer));
+    pushString("\r\n");
+    pushString(`--${boundary}--\r\n`);
+
+    const byteLength = chunks.reduce((sum, chunk) => sum + chunk.byteLength, 0);
+    const bodyBytes = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      bodyBytes.set(chunk, offset);
+      offset += chunk.byteLength;
+    }
+
+    return {
+      contentType: `multipart/form-data; boundary=${boundary}`,
+      body: bodyBytes.buffer,
+    };
+  }
+
   async transcribeWithMacOsSpeech(audioPath, language) {
-    if (typeof process === "undefined" || process.platform !== "darwin") {
+    if (!Platform.isMacOS) {
       throw new Error("macOS 로컬 STT는 macOS 데스크톱 환경에서만 사용할 수 있습니다.");
     }
 
@@ -868,7 +1131,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
   }
 
   async transcribeWithWindowsSpeech({ audioBlob, audioPath, language, previewTranscript }) {
-    if (typeof process !== "undefined" && process.platform !== "win32") {
+    if (!Platform.isWin) {
       throw new Error("Windows Speech provider는 Windows 데스크톱 환경에서만 사용할 수 있습니다.");
     }
 
@@ -891,9 +1154,9 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
   }
 
   async translateTranscriptToKorean({ transcript, sourceLanguage }) {
-    const apiKey = this.getActiveAiApiKey();
-    if (!apiKey) {
-      throw new Error(`${this.getAiProviderLabel(this.getActiveAiProvider())} API Key가 설정되지 않았습니다.`);
+    const unavailableReason = this.getAiUnavailableReason();
+    if (unavailableReason) {
+      throw new Error(unavailableReason);
     }
 
     const translated = await this.generateTextWithProvider({
@@ -920,17 +1183,27 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return translated;
   }
 
-  async generateSummary({ title, topic, sourceText, templateText, requestText }) {
-    const apiKey = this.getActiveAiApiKey();
-    if (!apiKey) {
-      throw new Error(`${this.getAiProviderLabel(this.getActiveAiProvider())} API Key가 설정되지 않았습니다.`);
+  async generateSummary({
+    title,
+    topic,
+    sourceText,
+    templateText,
+    requestText,
+    agendaText,
+    agentInstruction,
+    customAgentInstruction,
+  }) {
+    const unavailableReason = this.getAiUnavailableReason();
+    if (unavailableReason) {
+      throw new Error(unavailableReason);
     }
 
     const summary = await this.generateTextWithProvider({
       label: "요약 요청",
       systemPrompt: [
-        "당신은 음성 메모와 초안 문서를 정리하는 한국어 요약 도우미다.",
+        "당신은 회의 음성 메모와 초안 문서를 정리하는 한국어 회의록 도우미다.",
         "제공된 템플릿 구조를 최대한 유지하고, 원문에 없는 사실은 추측하지 마라.",
+        "사전 메모와 안건은 회의 맥락으로만 사용하고, 전사에 없는 결론을 만들어내지 마라.",
         "출력은 마크다운 본문만 반환한다.",
       ].join(" "),
       userPrompt: this.buildSummaryPrompt({
@@ -939,6 +1212,9 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         sourceText,
         templateText,
         requestText,
+        agendaText,
+        agentInstruction,
+        customAgentInstruction,
       }),
       temperature: 0.2,
     });
@@ -951,7 +1227,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
   }
 
   canUseAiSummary() {
-    return Boolean(this.getActiveAiApiKey());
+    return !this.getAiUnavailableReason();
   }
 
   buildSummaryFallbackDraft({ templateText, requestText }) {
@@ -959,7 +1235,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     const normalizedRequest = this.normalizeText(requestText);
     const guidanceBlock = [
       "> 자동 요약을 생성하지 않았습니다.",
-      `> 이유: ${this.getAiProviderLabel(this.getActiveAiProvider())} API Key가 없어 LLM 요약 단계를 건너뛰었습니다.`,
+      `> 이유: ${this.getAiUnavailableReason() || "AI Provider 설정이 완료되지 않았습니다."}`,
       "> 아래 음성 메모 전사 블록을 참고해 이 섹션을 이어서 정리하세요.",
     ].join("\n");
 
@@ -989,9 +1265,23 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     ].join("\n");
   }
 
-  buildSummaryPrompt({ title, topic, sourceText, templateText, requestText }) {
+  buildSummaryPrompt({
+    title,
+    topic,
+    sourceText,
+    templateText,
+    requestText,
+    agendaText,
+    agentInstruction,
+    customAgentInstruction,
+  }) {
     const normalizedTemplate = this.normalizeText(templateText);
     const normalizedRequest = this.normalizeText(requestText);
+    const normalizedAgenda = this.normalizeText(agendaText);
+    const agentPrompt = this.getAgentInstructionPrompt(
+      agentInstruction,
+      customAgentInstruction
+    );
 
     if (normalizedTemplate) {
       return [
@@ -999,6 +1289,11 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         "",
         `제목: ${title || "미입력"}`,
         `주제: ${topic || "미입력"}`,
+        `요약 에이전트 지침: ${this.getAgentInstructionLabel(agentInstruction)}`,
+        agentPrompt ? `세부 지침: ${agentPrompt}` : null,
+        normalizedAgenda ? "" : null,
+        normalizedAgenda ? "사전 메모/안건:" : null,
+        normalizedAgenda || null,
         "",
         "템플릿:",
         normalizedTemplate,
@@ -1012,6 +1307,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         "- 템플릿의 섹션 구조를 최대한 유지합니다.",
         "- 원문에서 확인되는 사실만 반영합니다.",
         "- 실행 항목은 가능하면 체크리스트로 정리합니다.",
+        "- 담당자나 기한이 명확하지 않으면 임의로 만들지 말고 '미정'으로 표시합니다.",
         "- 불필요한 서론이나 설명을 추가하지 않습니다.",
         "",
         "정리 대상 본문:",
@@ -1026,6 +1322,11 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       "",
       `제목: ${title || "미입력"}`,
       `주제: ${topic || "미입력"}`,
+      `요약 에이전트 지침: ${this.getAgentInstructionLabel(agentInstruction)}`,
+      agentPrompt ? `세부 지침: ${agentPrompt}` : null,
+      normalizedAgenda ? "" : null,
+      normalizedAgenda ? "사전 메모/안건:" : null,
+      normalizedAgenda || null,
       "",
       "요청사항:",
       normalizedRequest || "핵심 내용, 결정사항, 실행 항목이 드러나게 간결한 마크다운 노트로 정리합니다.",
@@ -1034,12 +1335,23 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       "- frontmatter/속성 블록이 있으면 문서 최상단에 유지합니다.",
       "- 결과는 노트의 메인 내용으로 바로 사용할 수 있게 작성합니다.",
       "- 원문에서 확인되는 사실만 반영합니다.",
+      "- 담당자나 기한이 명확하지 않으면 임의로 만들지 말고 '미정'으로 표시합니다.",
       "- 불필요한 서론 없이 바로 결과를 작성합니다.",
       "- 실행 항목이 있으면 체크리스트로 정리합니다.",
       "",
       "정리 대상 본문:",
       sourceText.trim(),
-    ].join("\n");
+    ]
+      .filter((line) => line !== null)
+      .join("\n");
+  }
+
+  getAgentInstructionPrompt(agentInstruction, customAgentInstruction) {
+    const normalized = normalizeAgentInstruction(agentInstruction);
+    if (normalized === "custom") {
+      return this.normalizeText(customAgentInstruction);
+    }
+    return AGENT_INSTRUCTION_MAP[normalized]?.prompt || AGENT_INSTRUCTION_MAP.meeting.prompt;
   }
 
   async getTemplatesFolderPath() {
@@ -1109,7 +1421,12 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   listMarkdownFiles(query) {
     const normalizedQuery = String(query || "").trim().toLowerCase();
-    return this.app.vault
+    const cached = this.markdownFileCache;
+    if (cached && cached.query === normalizedQuery) {
+      return cached.files;
+    }
+
+    const files = this.app.vault
       .getMarkdownFiles()
       .filter((file) => {
         if (!normalizedQuery) {
@@ -1120,6 +1437,12 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       })
       .sort((left, right) => left.path.localeCompare(right.path))
       .slice(0, 200);
+
+    this.markdownFileCache = {
+      query: normalizedQuery,
+      files,
+    };
+    return files;
   }
 
   async loadWorkspaceFile(path) {
@@ -1156,7 +1479,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
     const content = await this.app.vault.cachedRead(file);
     const updatedContent = this.buildPrimarySummaryContent(content, summaryText);
-    await this.app.vault.modify(file, updatedContent);
+    await this.writeNoteContent(file, updatedContent);
     return file;
   }
 
@@ -1206,6 +1529,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
         this.getOpenAiTranscriptionModel()
       )}"`,
       `summary_model: "${this.escapeYamlValue(this.getActiveAiModel())}"`,
+      `ai_provider: "${this.escapeYamlValue(this.getAiProviderLabel(this.getActiveAiProvider()))}"`,
       "---",
     ].join("\n");
     const archiveSection = this.upsertMarkdownSection(
@@ -1348,7 +1672,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   async writeBinaryFile(path, blob) {
     const data = await blob.arrayBuffer();
-    await this.app.vault.adapter.writeBinary(path, data);
+    await this.app.vault.createBinary(path, data);
 
     const file = this.app.vault.getAbstractFileByPath(path);
     if (!(file instanceof TFile)) {
@@ -1356,30 +1680,6 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     }
 
     return file;
-  }
-
-  async parseApiResponse(response, label) {
-    const rawText = await response.text();
-    let data = {};
-
-    if (rawText) {
-      try {
-        data = JSON.parse(rawText);
-      } catch (error) {
-        if (!response.ok) {
-          throw new Error(`${label} 실패: ${rawText}`);
-        }
-        throw new Error(`${label} 응답을 JSON으로 해석하지 못했습니다.`);
-      }
-    }
-
-    if (!response.ok) {
-      const apiMessage =
-        data?.error?.message || data?.message || rawText || `HTTP ${response.status}`;
-      throw new Error(`${label} 실패: ${apiMessage}`);
-    }
-
-    return data;
   }
 
   async parseRequestUrlResponse(response, label) {
@@ -1425,6 +1725,15 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return `${baseUrl}/models/${encodeURIComponent(model)}:generateContent`;
   }
 
+  buildOllamaApiUrl(endpoint) {
+    const baseUrl = this.getOllamaApiBaseUrl().replace(/\/+$/, "");
+    const normalizedEndpoint = endpoint.startsWith("/") ? endpoint : `/${endpoint}`;
+    if (baseUrl.endsWith("/api") && normalizedEndpoint.startsWith("/api/")) {
+      return `${baseUrl}${normalizedEndpoint.slice(4)}`;
+    }
+    return `${baseUrl}${normalizedEndpoint}`;
+  }
+
   async postJsonRequest(url, { label, headers, body }) {
     const response = await requestUrl({
       url,
@@ -1438,14 +1747,14 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   getPluginScriptPath(relativePath) {
     const path = require("path");
-    const basePath = this.app.vault.adapter.basePath;
+    const adapter = this.app.vault.adapter;
 
-    if (!basePath) {
+    if (!(adapter instanceof FileSystemAdapter)) {
       throw new Error("현재 환경에서는 로컬 스크립트 경로를 찾을 수 없습니다.");
     }
 
     return path.join(
-      basePath,
+      adapter.getBasePath(),
       this.app.vault.configDir,
       "plugins",
       this.manifest.id,
@@ -1455,17 +1764,17 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
 
   getVaultAbsolutePath(relativePath) {
     const path = require("path");
-    const basePath = this.app.vault.adapter.basePath;
+    const adapter = this.app.vault.adapter;
 
-    if (!basePath) {
+    if (!(adapter instanceof FileSystemAdapter)) {
       throw new Error("현재 환경에서는 볼트 절대 경로를 계산할 수 없습니다.");
     }
 
-    return path.join(basePath, normalizePath(relativePath));
+    return path.join(adapter.getBasePath(), normalizePath(relativePath));
   }
 
   async requestMacOsSpeechAuthorization(language) {
-    if (typeof process === "undefined" || process.platform !== "darwin") {
+    if (!Platform.isMacOS) {
       throw new Error("이 기능은 macOS 데스크톱 환경에서만 사용할 수 있습니다.");
     }
 
@@ -1503,7 +1812,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
   }
 
   async openMacPrivacySettings(target) {
-    if (typeof process === "undefined" || process.platform !== "darwin") {
+    if (!Platform.isMacOS) {
       throw new Error("이 기능은 macOS 데스크톱 환경에서만 사용할 수 있습니다.");
     }
 
@@ -1587,7 +1896,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       if (!trimmed) {
         continue;
       }
-      const match = trimmed.match(/^([A-Za-z0-9_-]+):\s*(.*)$/);
+      const match = trimmed.match(/^([^:\s][^:]*):\s*(.*)$/);
       if (!match) {
         return null;
       }
@@ -1637,6 +1946,113 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     );
   }
 
+  buildMeetingMetadataEntries({
+    title,
+    topic,
+    participants,
+    agenda,
+    recordingStartedAt,
+    recordingEndedAt,
+    durationSeconds,
+    consentConfirmed,
+    consentMethod,
+    audioPath,
+    sourceLanguage,
+    transcript,
+    agentInstruction,
+  }) {
+    const startedAt =
+      recordingStartedAt instanceof Date ? recordingStartedAt : new Date();
+    const endedAt = recordingEndedAt instanceof Date ? recordingEndedAt : startedAt;
+    const participantList = Array.isArray(participants)
+      ? participants
+      : this.parseListInput(participants);
+
+    return [
+      this.frontmatterEntry("type", "voice-meeting-note"),
+      this.frontmatterEntry("meeting_title", title || "미입력"),
+      this.frontmatterEntry("meeting_date", startedAt.toISOString().slice(0, 10)),
+      this.frontmatterEntry("meeting_source", "manual"),
+      this.frontmatterEntry("participants", participantList),
+      this.frontmatterEntry("agenda", this.inlineValue(agenda)),
+      this.frontmatterEntry("topic", this.inlineValue(topic)),
+      this.frontmatterEntry("recording_started_at", startedAt.toISOString()),
+      this.frontmatterEntry("recording_ended_at", endedAt.toISOString()),
+      this.frontmatterEntry("duration_seconds", Math.max(0, durationSeconds || 0)),
+      this.frontmatterEntry("consent_confirmed", Boolean(consentConfirmed)),
+      this.frontmatterEntry("consent_method", consentMethod || "manual"),
+      this.frontmatterEntry(
+        "stt_provider",
+        this.getSttProviderLabel(this.getResolvedSttProvider())
+      ),
+      this.frontmatterEntry("stt_model", this.getResolvedSttModelLabel()),
+      this.frontmatterEntry(
+        "ai_provider",
+        this.getAiProviderLabel(this.getActiveAiProvider())
+      ),
+      this.frontmatterEntry("summary_model", this.getActiveAiModel()),
+      this.frontmatterEntry(
+        "agent_instruction",
+        normalizeAgentInstruction(agentInstruction)
+      ),
+      this.frontmatterEntry("audio_file", audioPath),
+      this.frontmatterEntry(
+        "transcript_language",
+        this.getLanguageLabel(sourceLanguage)
+      ),
+      this.frontmatterEntry(
+        "transcript_chars",
+        this.normalizeText(transcript).length
+      ),
+    ];
+  }
+
+  parseListInput(value) {
+    if (Array.isArray(value)) {
+      return value.map((item) => this.inlineValue(item)).filter(Boolean);
+    }
+    return String(value || "")
+      .split(/[,;\n]/)
+      .map((item) => this.inlineValue(item))
+      .filter(Boolean);
+  }
+
+  yamlInlineArray(items) {
+    const normalizedItems = this.parseListInput(items);
+    if (normalizedItems.length === 0) {
+      return "[]";
+    }
+    return `[${normalizedItems.map((item) => this.yamlQuote(item)).join(", ")}]`;
+  }
+
+  frontmatterEntry(key, data) {
+    return {
+      key,
+      data,
+      value: this.toYamlLiteral(data),
+    };
+  }
+
+  toYamlLiteral(value) {
+    if (Array.isArray(value)) {
+      return this.yamlInlineArray(value);
+    }
+    if (typeof value === "boolean") {
+      return value ? "true" : "false";
+    }
+    if (typeof value === "number" && Number.isFinite(value)) {
+      return String(value);
+    }
+    if (value instanceof Date) {
+      return value.toISOString();
+    }
+    return this.yamlQuote(value ?? "");
+  }
+
+  yamlQuote(value) {
+    return `"${this.escapeYamlValue(value)}"`;
+  }
+
   extractGeminiText(responseData) {
     const parts = responseData?.candidates?.[0]?.content?.parts;
     if (!Array.isArray(parts)) {
@@ -1653,11 +2069,39 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     const model = this.getActiveAiModel();
     const apiKey = this.getActiveAiApiKey();
 
-    if (!apiKey) {
+    if (this.providerRequiresApiKey(provider) && !apiKey) {
       throw new Error(`${this.getAiProviderLabel(provider)} API Key가 설정되지 않았습니다.`);
     }
     if (!model) {
       throw new Error(`${this.getAiProviderLabel(provider)} 모델이 설정되지 않았습니다.`);
+    }
+
+    if (provider === "ollama") {
+      const data = await this.postJsonRequest(this.buildOllamaApiUrl("/api/chat"), {
+        label,
+        headers: {
+          "content-type": "application/json",
+        },
+        body: {
+          model,
+          stream: false,
+          messages: [
+            {
+              role: "system",
+              content: systemPrompt,
+            },
+            {
+              role: "user",
+              content: userPrompt,
+            },
+          ],
+          options: {
+            temperature,
+          },
+        },
+      });
+
+      return this.extractMessageText(data?.message?.content || data?.response).trim();
     }
 
     if (provider === "anthropic") {
@@ -1878,7 +2322,9 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     const existingBody = String(withoutSummary || "");
     const { frontmatter: summaryFrontmatter, body: summaryBodyRaw } =
       this.splitFrontmatter(normalizedSummary);
-    const mergedFrontmatter = summaryFrontmatter || existingFrontmatter;
+    const baseFrontmatter = summaryFrontmatter
+      ? this.mergeFrontmatterBlocks(existingFrontmatter, summaryFrontmatter)
+      : existingFrontmatter;
     const trimmedExistingBody = String(existingBody || "").trim();
     const firstHeading = trimmedExistingBody.match(/^#\s+.+$/m)?.[0] || "";
     const summaryBody = String(summaryBodyRaw || normalizedSummary).trim();
@@ -1893,7 +2339,7 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     ].filter(Boolean);
 
     return [
-      mergedFrontmatter ? `${mergedFrontmatter}\n` : "",
+      baseFrontmatter ? `${baseFrontmatter}\n` : "",
       bodyParts.join("\n\n").trim(),
       "",
     ]
@@ -1934,6 +2380,10 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     return String(value || "")
       .replace(/\\/g, "\\\\")
       .replace(/"/g, '\\"');
+  }
+
+  escapeHeaderValue(value) {
+    return String(value || "").replace(/["\r\n]/g, "_");
   }
 
   basename(path) {
@@ -2007,12 +2457,21 @@ class VoiceSummarySidebarView extends ItemView {
     this.noteOptions = [];
     this.recordedAudioBlob = null;
     this.recordingCreatedAt = null;
+    this.recordingSessionStartedAt = null;
+    this.recordingSessionEndedAt = null;
+    this.lastRecordingDurationMs = 0;
     this.state = {
       activeTab: "transcript",
       noteTitle: "",
       topic: "",
+      participants: "",
+      agenda: "",
       sourceLanguage: this.plugin.settings.sourceLanguage,
       translateToKorean: Boolean(this.plugin.settings.translateToKorean),
+      agentInstruction: this.plugin.settings.defaultAgentInstruction,
+      customAgentInstruction: this.plugin.settings.customAgentInstruction || "",
+      consentConfirmed: false,
+      consentMethod: "manual",
       selectedTemplatePath:
         this.plugin.settings.selectedTemplatePath || TEMPLATE_CUSTOM_VALUE,
       templateDraft:
@@ -2185,6 +2644,32 @@ class VoiceSummarySidebarView extends ItemView {
       cls: "voice-workflow-track-fill",
     });
 
+    const consentSection = this.transcriptPanelEl.createDiv({
+      cls: "voice-workflow-consent",
+    });
+    const consentToggle = consentSection.createDiv({
+      cls: "voice-summary-toggle",
+    });
+    this.consentToggleEl = consentToggle.createEl("input");
+    this.consentToggleEl.type = "checkbox";
+    this.consentToggleEl.id = "voice-workflow-consent-toggle";
+    const consentLabel = consentToggle.createEl("label", {
+      text: "참여자 녹음/전사 동의 확인",
+    });
+    consentLabel.setAttr("for", "voice-workflow-consent-toggle");
+    this.consentToggleEl.addEventListener("change", () => {
+      this.state.consentConfirmed = this.consentToggleEl.checked;
+      this.state.consentMethod = this.consentToggleEl.checked ? "manual" : "";
+      this.updateButtonState();
+    });
+    this.copyConsentButtonEl = consentSection.createEl("button", {
+      text: "동의문 복사",
+      cls: "voice-workflow-inline-button",
+    });
+    this.copyConsentButtonEl.addEventListener("click", () => {
+      void this.handleCopyConsentMessage();
+    });
+
     const transcriptFeedHeader = this.transcriptPanelEl.createDiv({
       cls: "voice-workflow-section-header",
     });
@@ -2310,6 +2795,32 @@ class VoiceSummarySidebarView extends ItemView {
     const detailsBody = detailsSection.createDiv({
       cls: "voice-workflow-advanced-body",
     });
+    const participantsField = this.createField(
+      detailsBody,
+      "참여자",
+      "쉼표로 구분해 입력하면 회의 메타데이터에 저장됩니다."
+    );
+    this.participantsInputEl = participantsField.createEl("input");
+    this.participantsInputEl.type = "text";
+    this.participantsInputEl.placeholder = "예: 홍길동, 김철수";
+    this.participantsInputEl.addEventListener("input", () => {
+      this.state.participants = this.participantsInputEl.value;
+    });
+
+    const agendaField = this.createField(
+      detailsBody,
+      "사전 메모/안건",
+      "요약 생성 시 회의 맥락으로 참고하고 메타데이터에도 저장합니다."
+    );
+    this.agendaTextareaEl = agendaField.createEl("textarea", {
+      cls: "voice-summary-textarea voice-summary-agenda",
+    });
+    this.agendaTextareaEl.placeholder = "예: 오늘은 출시 일정과 담당자 확정을 논의";
+    this.agendaTextareaEl.rows = 4;
+    this.agendaTextareaEl.addEventListener("input", () => {
+      this.state.agenda = this.agendaTextareaEl.value;
+    });
+
     const topicField = this.createField(
       detailsBody,
       "주제",
@@ -2320,6 +2831,40 @@ class VoiceSummarySidebarView extends ItemView {
     this.topicInputEl.placeholder = "예: 미팅 액션 아이템";
     this.topicInputEl.addEventListener("input", () => {
       this.state.topic = this.topicInputEl.value;
+    });
+
+    const agentField = this.createField(
+      detailsBody,
+      "요약 에이전트 지침",
+      "회의 성격에 따라 요약 구조와 강조점을 바꿉니다."
+    );
+    this.agentInstructionSelectEl = agentField.createEl("select");
+    for (const option of this.plugin.getAgentInstructionOptions()) {
+      this.agentInstructionSelectEl.appendChild(new Option(option.label, option.value));
+    }
+    this.agentInstructionSelectEl.addEventListener("change", async () => {
+      this.state.agentInstruction = this.agentInstructionSelectEl.value;
+      this.plugin.settings.defaultAgentInstruction = this.state.agentInstruction;
+      await this.plugin.saveSettings();
+      this.syncPostProcessUi();
+    });
+
+    this.customAgentFieldEl = this.createField(
+      detailsBody,
+      "커스텀 에이전트 지침",
+      "직접 만든 회의록 규칙을 저장해 재사용합니다."
+    );
+    this.customAgentTextareaEl = this.customAgentFieldEl.createEl("textarea", {
+      cls: "voice-summary-textarea voice-summary-agent",
+    });
+    this.customAgentTextareaEl.placeholder =
+      "예: 리스크와 의사결정 근거를 먼저 쓰고, 액션 아이템은 담당자/기한 기준 표로 정리";
+    this.customAgentTextareaEl.rows = 5;
+    this.customAgentTextareaEl.addEventListener("input", async () => {
+      this.state.customAgentInstruction = this.customAgentTextareaEl.value;
+      this.plugin.settings.customAgentInstruction =
+        this.state.customAgentInstruction.trim();
+      await this.plugin.saveSettings();
     });
 
     const translateField = this.createField(
@@ -2427,6 +2972,22 @@ class VoiceSummarySidebarView extends ItemView {
   syncUiFromState() {
     if (this.topicInputEl) {
       this.topicInputEl.value = this.state.topic || "";
+    }
+    if (this.participantsInputEl) {
+      this.participantsInputEl.value = this.state.participants || "";
+    }
+    if (this.agendaTextareaEl) {
+      this.agendaTextareaEl.value = this.state.agenda || "";
+    }
+    if (this.agentInstructionSelectEl) {
+      this.agentInstructionSelectEl.value =
+        this.state.agentInstruction || this.plugin.settings.defaultAgentInstruction;
+    }
+    if (this.customAgentTextareaEl) {
+      this.customAgentTextareaEl.value = this.state.customAgentInstruction || "";
+    }
+    if (this.consentToggleEl) {
+      this.consentToggleEl.checked = Boolean(this.state.consentConfirmed);
     }
     if (this.languageSelectEl) {
       this.languageSelectEl.value = this.state.sourceLanguage || "auto";
@@ -2670,6 +3231,27 @@ class VoiceSummarySidebarView extends ItemView {
     }
   }
 
+  async handleCopyConsentMessage() {
+    try {
+      const message =
+        this.plugin.normalizeText(this.plugin.settings.consentMessage) ||
+        DEFAULT_CONSENT_MESSAGE;
+      if (navigator.clipboard?.writeText) {
+        await navigator.clipboard.writeText(message);
+      } else {
+        const { clipboard } = require("electron");
+        clipboard.writeText(message);
+      }
+      this.setStatus("동의문을 클립보드에 복사했습니다.");
+      new Notice("동의문을 복사했습니다.");
+    } catch (error) {
+      this.setStatus(
+        `동의문을 복사하지 못했습니다: ${error.message || String(error)}`,
+        true
+      );
+    }
+  }
+
   setBusy(isBusy) {
     this.isBusy = isBusy;
     this.updateButtonState();
@@ -2683,7 +3265,11 @@ class VoiceSummarySidebarView extends ItemView {
       !this.isBusy && Boolean(this.recordedAudioBlob) && hasTranscript;
 
     if (this.startButton) {
-      this.startButton.disabled = this.isBusy || this.isRecording;
+      this.startButton.disabled =
+        this.isBusy ||
+        this.isRecording ||
+        (this.plugin.settings.requireConsentBeforeRecording &&
+          !this.state.consentConfirmed);
     }
     if (this.pauseButton) {
       this.pauseButton.disabled = this.isBusy || !this.isRecording;
@@ -2735,7 +3321,7 @@ class VoiceSummarySidebarView extends ItemView {
       stateClass = "is-ready";
       message = this.plugin.canUseAiSummary()
         ? "전사가 준비됐습니다. 템플릿과 저장 대상을 확인한 뒤 요약 저장을 눌러주세요."
-        : "전사가 준비됐습니다. API Key 없이 초안 저장을 진행할 수 있어요.";
+        : "전사가 준비됐습니다. AI 요약 없이 초안 저장을 진행할 수 있어요.";
     }
 
     this.summaryActionHintEl.setText(message);
@@ -2909,6 +3495,12 @@ class VoiceSummarySidebarView extends ItemView {
     if (this.newNoteFieldEl) {
       this.newNoteFieldEl.toggleClass("is-hidden", this.state.noteMode !== "new");
     }
+    if (this.customAgentFieldEl) {
+      this.customAgentFieldEl.toggleClass(
+        "is-hidden",
+        this.state.agentInstruction !== "custom"
+      );
+    }
 
     const disableTargetInputs = this.isBusy || !hasRecording;
     if (this.requestTextareaEl) {
@@ -2922,6 +3514,18 @@ class VoiceSummarySidebarView extends ItemView {
     }
     if (this.newNoteTitleInputEl) {
       this.newNoteTitleInputEl.disabled = disableTargetInputs;
+    }
+    if (this.participantsInputEl) {
+      this.participantsInputEl.disabled = this.isBusy;
+    }
+    if (this.agendaTextareaEl) {
+      this.agendaTextareaEl.disabled = this.isBusy;
+    }
+    if (this.agentInstructionSelectEl) {
+      this.agentInstructionSelectEl.disabled = this.isBusy;
+    }
+    if (this.customAgentTextareaEl) {
+      this.customAgentTextareaEl.disabled = this.isBusy;
     }
   }
 
@@ -2939,7 +3543,7 @@ class VoiceSummarySidebarView extends ItemView {
     const providerLabel = this.plugin.getAiProviderLabel(this.plugin.getActiveAiProvider());
     const summaryModeText = this.plugin.canUseAiSummary()
       ? `${providerLabel}로 요약을 생성해 저장합니다.`
-      : `${providerLabel} API Key가 없어 템플릿/요청사항 기반 초안만 저장합니다.`;
+      : `${this.plugin.getAiUnavailableReason()} 템플릿/요청사항 기반 초안만 저장합니다.`;
 
     if (this.state.noteMode === "current") {
       const activeFile = this.app.workspace.getActiveFile();
@@ -3053,6 +3657,11 @@ class VoiceSummarySidebarView extends ItemView {
       text: committedText,
       time: this.formatFeedTimestamp(date),
     });
+    if (this.transcriptFeedItems.length > MAX_TRANSCRIPT_FEED_ITEMS) {
+      this.transcriptFeedItems = this.transcriptFeedItems.slice(
+        -MAX_TRANSCRIPT_FEED_ITEMS
+      );
+    }
     this.resetLiveTranscriptChunkState(
       this.recordedBuffers.length,
       this.getCurrentRecordingElapsedMs()
@@ -3186,6 +3795,14 @@ class VoiceSummarySidebarView extends ItemView {
       return;
     }
 
+    if (
+      this.plugin.settings.requireConsentBeforeRecording &&
+      !this.state.consentConfirmed
+    ) {
+      this.setStatus("녹음을 시작하기 전에 참여자 동의 확인을 체크하세요.", true);
+      return;
+    }
+
     try {
       this.setBusy(true);
       this.setStatus("마이크와 실시간 전사를 시작합니다...");
@@ -3193,6 +3810,9 @@ class VoiceSummarySidebarView extends ItemView {
       this.clearLiveTranscript(false);
       this.recordedAudioBlob = null;
       this.recordingCreatedAt = null;
+      this.recordingSessionStartedAt = null;
+      this.recordingSessionEndedAt = null;
+      this.lastRecordingDurationMs = 0;
       this.state.finalTranscript = "";
       this.state.savedAudioPath = "";
       this.state.translatedTranscript = "";
@@ -3216,7 +3836,11 @@ class VoiceSummarySidebarView extends ItemView {
       this.recordedBuffers = [];
       this.sampleRate = this.audioContext.sampleRate;
       this.sourceNode = this.audioContext.createMediaStreamSource(this.stream);
-      this.processorNode = this.audioContext.createScriptProcessor(4096, 1, 1);
+      this.processorNode = this.audioContext.createScriptProcessor(
+        AUDIO_PROCESSOR_BUFFER_SIZE,
+        1,
+        1
+      );
       this.processorNode.onaudioprocess = (event) => {
         if (!this.isRecording || this.isPaused) {
           return;
@@ -3229,6 +3853,7 @@ class VoiceSummarySidebarView extends ItemView {
       this.sourceNode.connect(this.processorNode);
       this.processorNode.connect(this.audioContext.destination);
       this.isRecording = true;
+      this.recordingSessionStartedAt = new Date();
       this.startPreviewLoop();
       this.recordingStartedAt = Date.now();
       this.startTimer();
@@ -3302,6 +3927,7 @@ class VoiceSummarySidebarView extends ItemView {
 
       this.recordedAudioBlob = audioBlob;
       this.recordingCreatedAt = createdAt;
+      this.recordingSessionEndedAt = createdAt;
       await this.ensureRecordedAudioSaved(createdAt);
 
       const result = await this.finalizeStoppedRecording(audioBlob);
@@ -3352,7 +3978,7 @@ class VoiceSummarySidebarView extends ItemView {
         this.setStatus(
           this.plugin.canUseAiSummary()
             ? "녹음이 끝났습니다. 템플릿 또는 요청사항과 저장할 노트를 선택한 뒤 요약 저장을 진행하세요."
-            : "녹음이 끝났습니다. 템플릿 또는 요청사항과 저장할 노트를 선택하면 API Key 없이 초안 저장을 진행합니다."
+            : `녹음이 끝났습니다. ${this.plugin.getAiUnavailableReason()} 템플릿 또는 요청사항 기반 초안 저장은 가능합니다.`
         );
       }
       new Notice("녹음 종료. 후속 정리 옵션을 선택하세요.");
@@ -3372,6 +3998,9 @@ class VoiceSummarySidebarView extends ItemView {
     this.clearLiveTranscript(true);
     this.recordedAudioBlob = null;
     this.recordingCreatedAt = null;
+    this.recordingSessionStartedAt = null;
+    this.recordingSessionEndedAt = null;
+    this.lastRecordingDurationMs = 0;
     this.state.finalTranscript = "";
     this.state.savedAudioPath = "";
     this.state.translatedTranscript = "";
@@ -3475,15 +4104,22 @@ class VoiceSummarySidebarView extends ItemView {
     };
   }
 
-  buildSummarySourceForTarget(content, transcript, translatedTranscript) {
+  buildSummarySourceForTarget(content, transcript, translatedTranscript, agendaText) {
     const currentNoteBody = this.plugin
       .removeMarkdownSection(this.plugin.stripFrontmatter(content), SUMMARY_HEADING)
       .trim();
     const latestRecordingText =
       this.plugin.normalizeText(translatedTranscript) ||
       this.plugin.normalizeText(transcript);
+    const normalizedAgenda = this.plugin.normalizeText(agendaText);
 
-    return [currentNoteBody, "## 이번 녹음 전사", latestRecordingText]
+    return [
+      normalizedAgenda ? "## 사전 메모/안건" : "",
+      normalizedAgenda,
+      currentNoteBody,
+      "## 이번 녹음 전사",
+      latestRecordingText,
+    ]
       .filter(Boolean)
       .join("\n\n")
       .trim();
@@ -3569,7 +4205,7 @@ class VoiceSummarySidebarView extends ItemView {
       this.setStatus(
         this.plugin.canUseAiSummary()
           ? "녹음 내용을 요약하고 노트에 저장하는 중입니다..."
-          : "API Key 없이 전사 초안을 노트에 저장하는 중입니다..."
+          : "AI 요약 설정이 완료되지 않아 전사 초안을 노트에 저장하는 중입니다..."
       );
 
       const createdAt = this.recordingCreatedAt || new Date();
@@ -3599,6 +4235,22 @@ class VoiceSummarySidebarView extends ItemView {
       }
       this.state.savedAudioPath = audioPath;
 
+      const metadataEntries = this.plugin.buildMeetingMetadataEntries({
+        title: noteTitle,
+        topic: this.state.topic.trim(),
+        participants: this.state.participants,
+        agenda: this.state.agenda,
+        recordingStartedAt: this.recordingSessionStartedAt || createdAt,
+        recordingEndedAt: this.recordingSessionEndedAt || createdAt,
+        durationSeconds: Math.round((this.lastRecordingDurationMs || 0) / 1000),
+        consentConfirmed: Boolean(this.state.consentConfirmed),
+        consentMethod: this.state.consentMethod || "manual",
+        audioPath,
+        sourceLanguage: this.state.sourceLanguage,
+        transcript,
+        agentInstruction: this.state.agentInstruction,
+      });
+
       const recordingContent = this.plugin.appendRecordingToNote(currentContent, {
         createdAt,
         topic: this.state.topic.trim(),
@@ -3611,7 +4263,8 @@ class VoiceSummarySidebarView extends ItemView {
       const sourceText = this.buildSummarySourceForTarget(
         currentContent,
         transcript,
-        this.state.translatedTranscript
+        this.state.translatedTranscript,
+        this.state.agenda
       );
 
       const summary = this.plugin.canUseAiSummary()
@@ -3621,6 +4274,9 @@ class VoiceSummarySidebarView extends ItemView {
             sourceText,
             templateText,
             requestText,
+            agendaText: this.state.agenda,
+            agentInstruction: this.state.agentInstruction,
+            customAgentInstruction: this.state.customAgentInstruction,
           })
         : this.plugin.buildSummaryFallbackDraft({
             templateText,
@@ -3632,6 +4288,7 @@ class VoiceSummarySidebarView extends ItemView {
         summary
       );
       await this.plugin.writeNoteContent(noteFile, finalContent);
+      await this.plugin.applyFrontmatterEntriesToFile(noteFile, metadataEntries);
 
       this.state.selectedFilePath = noteFile.path;
       this.refreshNoteOptions();
@@ -3642,8 +4299,8 @@ class VoiceSummarySidebarView extends ItemView {
         this.setStatus("요약을 노트에 저장했습니다.");
         new Notice("녹음 요약을 노트에 저장했습니다.");
       } else {
-        this.setStatus("API Key 없이 전사 초안을 노트에 저장했습니다.");
-        new Notice("API Key 없이 전사 초안을 노트에 저장했습니다.");
+        this.setStatus("AI 요약 없이 전사 초안을 노트에 저장했습니다.");
+        new Notice("전사 초안을 노트에 저장했습니다.");
       }
     } catch (error) {
       this.setStatus(
@@ -3676,7 +4333,7 @@ class VoiceSummarySidebarView extends ItemView {
     this.stopPreviewLoop();
     this.previewTimerId = window.setInterval(() => {
       void this.maybeTranscribePreview(false);
-    }, 2500);
+    }, PREVIEW_TRANSCRIPT_INTERVAL_MS);
   }
 
   stopPreviewLoop() {
@@ -3706,7 +4363,7 @@ class VoiceSummarySidebarView extends ItemView {
     const totalSamples = newBuffers.reduce((sum, buffer) => sum + buffer.length, 0);
     const minimumSamples = forceFlush
       ? Math.floor(this.sampleRate * 0.4)
-      : Math.floor(this.sampleRate * 1.8);
+      : Math.floor(this.sampleRate * PREVIEW_TRANSCRIPT_MIN_SECONDS);
 
     if (totalSamples < minimumSamples) {
       return;
@@ -3754,8 +4411,7 @@ class VoiceSummarySidebarView extends ItemView {
 
   async transcribePreviewChunk(audioBlob) {
     const provider = this.plugin.getResolvedSttProvider();
-    const canUseMacPreview =
-      typeof process !== "undefined" && process.platform === "darwin";
+    const canUseMacPreview = Platform.isMacOS;
 
     if (provider === "macos-speech" && canUseMacPreview) {
       const { promises: fs } = require("fs");
@@ -3960,6 +4616,7 @@ class VoiceSummarySidebarView extends ItemView {
     if (!this.isPaused) {
       this.recordedElapsedMs += Date.now() - this.recordingStartedAt;
     }
+    this.lastRecordingDurationMs = this.recordedElapsedMs;
     this.stopTimer(false);
     await this.stopSpeechRecognition();
     await this.maybeTranscribePreview(true);
@@ -4181,6 +4838,33 @@ class VoiceSummaryWorkflowSettingTab extends PluginSettingTab {
           })
       );
 
+    new Setting(containerEl)
+      .setName("녹음 전 동의 확인 요구")
+      .setDesc("켜두면 우측 패널에서 참여자 동의 확인을 체크해야 녹음을 시작할 수 있습니다.")
+      .addToggle((toggle) =>
+        toggle
+          .setValue(Boolean(this.plugin.settings.requireConsentBeforeRecording))
+          .onChange(async (value) => {
+            this.plugin.settings.requireConsentBeforeRecording = value;
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("동의 메시지")
+      .setDesc("우측 패널의 동의문 복사 버튼에서 사용할 문구입니다.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder(DEFAULT_CONSENT_MESSAGE)
+          .setValue(this.plugin.settings.consentMessage)
+          .onChange(async (value) => {
+            this.plugin.settings.consentMessage =
+              value.trim() || DEFAULT_CONSENT_MESSAGE;
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 3;
+      });
+
     containerEl.createEl("h3", { text: "AI 요약/번역 Provider" });
 
     new Setting(containerEl)
@@ -4203,6 +4887,36 @@ class VoiceSummaryWorkflowSettingTab extends PluginSettingTab {
     containerEl.createEl("p", {
       text: `현재 선택: ${this.plugin.getAiProviderLabel(this.plugin.getActiveAiProvider())}`,
     });
+
+    new Setting(containerEl)
+      .setName("기본 요약 에이전트 지침")
+      .setDesc("새 Voice Workflow 패널에서 기본으로 선택할 회의록 정리 방식입니다.")
+      .addDropdown((dropdown) => {
+        for (const option of this.plugin.getAgentInstructionOptions()) {
+          dropdown.addOption(option.value, option.label);
+        }
+
+        dropdown
+          .setValue(this.plugin.settings.defaultAgentInstruction)
+          .onChange(async (value) => {
+            this.plugin.settings.defaultAgentInstruction = value;
+            await this.plugin.saveSettings();
+          });
+      });
+
+    new Setting(containerEl)
+      .setName("커스텀 에이전트 지침")
+      .setDesc("에이전트 지침을 커스텀으로 선택했을 때 사용할 기본 규칙입니다.")
+      .addTextArea((text) => {
+        text
+          .setPlaceholder("예: 결정사항과 리스크를 먼저 쓰고, 액션 아이템은 담당자/기한 표로 정리")
+          .setValue(this.plugin.settings.customAgentInstruction)
+          .onChange(async (value) => {
+            this.plugin.settings.customAgentInstruction = value.trim();
+            await this.plugin.saveSettings();
+          });
+        text.inputEl.rows = 5;
+      });
 
     containerEl.createEl("h3", { text: "OpenAI 설정" });
 
@@ -4254,6 +4968,34 @@ class VoiceSummaryWorkflowSettingTab extends PluginSettingTab {
           .setValue(this.plugin.settings.openAiSummaryModel)
           .onChange(async (value) => {
             this.plugin.settings.openAiSummaryModel = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    containerEl.createEl("h3", { text: "Ollama 설정" });
+
+    new Setting(containerEl)
+      .setName("Ollama Base URL")
+      .setDesc("로컬 Ollama 서버 주소입니다. 기본값은 http://localhost:11434 입니다.")
+      .addText((text) =>
+        text
+          .setPlaceholder("http://localhost:11434")
+          .setValue(this.plugin.settings.ollamaApiBaseUrl)
+          .onChange(async (value) => {
+            this.plugin.settings.ollamaApiBaseUrl = value.trim();
+            await this.plugin.saveSettings();
+          })
+      );
+
+    new Setting(containerEl)
+      .setName("Ollama Model")
+      .setDesc("예: qwen3, llama3.2, gemma3. 먼저 터미널에서 ollama pull로 받아두세요.")
+      .addText((text) =>
+        text
+          .setPlaceholder("qwen3")
+          .setValue(this.plugin.settings.ollamaModel)
+          .onChange(async (value) => {
+            this.plugin.settings.ollamaModel = value.trim();
             await this.plugin.saveSettings();
           })
       );

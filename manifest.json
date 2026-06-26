@@ -1,9 +1,9 @@
 {
   "id": "voice-summary-workflow",
   "name": "Voice Workflow",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "minAppVersion": "1.5.12",
-  "description": "Right-sidebar voice workflow for live transcript capture, raw-text preservation, template-based summaries, and file-focused final editing in Obsidian.",
+  "description": "Capture, transcribe, summarize, and archive voice meeting notes with local or cloud AI providers.",
   "author": "roar-jar",
   "authorUrl": "https://github.com/roar-jar",
   "isDesktopOnly": true
