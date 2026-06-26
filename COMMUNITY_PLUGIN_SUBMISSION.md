@@ -26,6 +26,7 @@ Add this object to `community-plugins.json` in `obsidianmd/obsidian-releases`:
 - Release `0.4.0` contains `main.js`, `manifest.json`, and `styles.css` as individual assets.
 - Fork `master` has been synced with `obsidianmd/obsidian-releases:master`.
 - The accidental fork-internal PR branch `add-voice-summary-workflow` has been deleted.
+- GitHub Actions have been disabled on the `roar-jar/obsidian-releases` fork to prevent fork-internal validation emails from accidental PRs.
 - Clean registry branch has been pushed to `roar-jar/obsidian-releases:add-voice-workflow-plugin`.
 - Upstream PR creation through the GitHub API failed with `CreatePullRequest` permission restrictions. Use this compare URL to open it manually:
   - https://github.com/obsidianmd/obsidian-releases/compare/master...roar-jar:obsidian-releases:add-voice-workflow-plugin?expand=1
