@@ -11,7 +11,7 @@ Add this object to `community-plugins.json` in `obsidianmd/obsidian-releases`:
   "id": "voice-summary-workflow",
   "name": "Voice Workflow",
   "author": "roar-jar",
-  "description": "Capture, transcribe, summarize, and archive voice meeting notes with local or cloud AI providers.",
+  "description": "Capture, transcribe, summarize, and archive voice meeting notes with local or cloud AI providers. - This plugin has not been manually reviewed by Obsidian staff.",
   "repo": "roar-jar/obsidian-voice-workflow"
 }
 ```
@@ -21,23 +21,28 @@ Add this object to `community-plugins.json` in `obsidianmd/obsidian-releases`:
 - `voice-summary-workflow` is available in the current upstream `community-plugins.json`.
 - `roar-jar/obsidian-voice-workflow` is not currently listed in the upstream registry.
 - No matching open upstream PR was found for this plugin.
+- Source repo `main` has been pushed.
+- GitHub Release `0.4.0` has been created.
+- Release `0.4.0` contains `main.js`, `manifest.json`, and `styles.css` as individual assets.
+- Registry branch has been pushed to `roar-jar/obsidian-releases:add-voice-summary-workflow`.
+- Upstream PR creation through the GitHub API failed with `CreatePullRequest` permission restrictions. Use this compare URL to open it manually:
+  - https://github.com/obsidianmd/obsidian-releases/compare/master...roar-jar:obsidian-releases:add-voice-summary-workflow?expand=1
 - Local validation passed:
   - `node --check main.js`
   - `git diff --check`
-- GitHub Release `0.4.0` has not been created yet.
 - Runtime testing in an Obsidian vault is still required before checking the platform boxes in the upstream PR template.
 
 ## Release checklist
 
-- [ ] Push the latest `main` branch to `roar-jar/obsidian-voice-workflow`.
-- [ ] Create a GitHub Release named exactly `0.4.0`.
-- [ ] Attach these files as individual release assets:
-  - [ ] `main.js`
-  - [ ] `manifest.json`
-  - [ ] `styles.css`
-- [ ] Confirm the release tag/name does not include a `v` prefix.
-- [ ] Confirm the release `manifest.json` version is `0.4.0`.
-- [ ] Confirm `versions.json` includes `0.4.0`.
+- [x] Push the latest `main` branch to `roar-jar/obsidian-voice-workflow`.
+- [x] Create a GitHub Release named exactly `0.4.0`.
+- [x] Attach these files as individual release assets:
+  - [x] `main.js`
+  - [x] `manifest.json`
+  - [x] `styles.css`
+- [x] Confirm the release tag/name does not include a `v` prefix.
+- [x] Confirm the release `manifest.json` version is `0.4.0`.
+- [x] Confirm `versions.json` includes `0.4.0`.
 - [ ] Test installing the release manually in a clean vault.
 - [ ] Test the plugin on macOS.
 - [ ] Test Windows Speech on Windows before checking Windows in the PR template.
