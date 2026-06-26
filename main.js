@@ -364,16 +364,6 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
       (leaf) => new VoiceSummarySidebarView(leaf, this)
     );
 
-    this.registerEvent(
-      this.app.vault.on("create", () => this.invalidateMarkdownFileCache())
-    );
-    this.registerEvent(
-      this.app.vault.on("delete", () => this.invalidateMarkdownFileCache())
-    );
-    this.registerEvent(
-      this.app.vault.on("rename", () => this.invalidateMarkdownFileCache())
-    );
-
     this.addRibbonIcon("mic", "Voice Workflow 열기", () => {
       void this.activateView();
     });
@@ -397,6 +387,16 @@ module.exports = class VoiceSummaryWorkflowPlugin extends Plugin {
     this.addSettingTab(new VoiceSummaryWorkflowSettingTab(this.app, this));
 
     this.app.workspace.onLayoutReady(() => {
+      this.registerEvent(
+        this.app.vault.on("create", () => this.invalidateMarkdownFileCache())
+      );
+      this.registerEvent(
+        this.app.vault.on("delete", () => this.invalidateMarkdownFileCache())
+      );
+      this.registerEvent(
+        this.app.vault.on("rename", () => this.invalidateMarkdownFileCache())
+      );
+
       if (this.settings.openSidebarOnStartup) {
         void this.activateView();
       }
